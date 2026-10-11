@@ -517,6 +517,45 @@ describe("createEmbeddedRunFailoverRetryController", () => {
     }
   });
 
+  it("continues backoff and retry accounting when the retry notification rejects", async () => {
+    const controller = createController(vi.fn(async () => false));
+    const onRetry = vi.fn(async () => {
+      throw new Error("status channel closed");
+    });
+
+    await expect(controller.maybeRetryTransient({ reason: "server_error", onRetry })).resolves.toBe(
+      true,
+    );
+
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(controller.transientRetryCount).toBe(1);
+    expect(mocks.sleepWithAbort).toHaveBeenCalledTimes(1);
+    expect(mocks.warn).toHaveBeenCalledWith(
+      expect.stringContaining("retry status notification failed"),
+    );
+  });
+
+  it("keeps abort cancellation effective after a rejected retry notification", async () => {
+    const controller = createController(
+      vi.fn(async () => false),
+      false,
+      new AbortController().signal,
+    );
+    const abortError = new Error("retry wait aborted");
+    mocks.sleepWithAbort.mockImplementation(async () => {
+      throw abortError;
+    });
+
+    await expect(
+      controller.maybeRetryTransient({
+        reason: "timeout",
+        onRetry: async () => {
+          throw new Error("status channel closed");
+        },
+      }),
+    ).rejects.toBe(abortError);
+  });
+
   it("escalates after one successful rate-limit rotation without advancing again", async () => {
     const advanceAuthProfile = vi.fn(async () => true);
     const controller = createController(advanceAuthProfile, true);

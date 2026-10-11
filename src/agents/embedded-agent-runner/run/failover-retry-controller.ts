@@ -1,6 +1,7 @@
 import { sanitizeForLog } from "../../../../packages/terminal-core/src/ansi.js";
 import { sleepWithAbort } from "../../../infra/backoff.js";
 import { emitDiagnosticsTimelineEvent } from "../../../infra/diagnostics-timeline.js";
+import { formatErrorMessage } from "../../../infra/errors.js";
 import {
   type AuthProfileFailureReason,
   markAuthProfileFailure,
@@ -370,15 +371,23 @@ export function createEmbeddedRunFailoverRetryController(input: {
       log.warn(
         `transient same-model retry ${retryCount + 1}/${retryBudget} for ${sanitizeForLog(provider)}/${sanitizeForLog(modelId)} reason=${retry.reason}: delayMs=${delayMs}`,
       );
-      await retry.onRetry?.({
-        attempt: retry.reason === "output_limit" ? outputLimitRetryCount + 1 : retryCount + 1,
-        maxRetries:
-          retry.reason === "output_limit"
-            ? Math.min(retryBudget, MAX_OUTPUT_LIMIT_RETRIES)
-            : retryBudget,
-        delayMs,
-        reason: retry.reason,
-      });
+      try {
+        await retry.onRetry?.({
+          attempt: retry.reason === "output_limit" ? outputLimitRetryCount + 1 : retryCount + 1,
+          maxRetries:
+            retry.reason === "output_limit"
+              ? Math.min(retryBudget, MAX_OUTPUT_LIMIT_RETRIES)
+              : retryBudget,
+          delayMs,
+          reason: retry.reason,
+        });
+      } catch (error) {
+        // Status notification is best effort: a rejecting host callback must not
+        // abort recovery, so backoff and the same-model retry still run.
+        log.warn(
+          `retry status notification failed; continuing backoff: ${formatErrorMessage(error)}`,
+        );
+      }
       const closeRetryWait = params.onRetryWait?.(Date.now() + delayMs, params.abortSignal);
       let completed = false;
       try {
