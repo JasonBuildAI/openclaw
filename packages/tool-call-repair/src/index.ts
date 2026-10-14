@@ -2,10 +2,8 @@ export { detectToolCallShapedText, isPlainTextToolCallAttempt } from "./attempt.
 /** Public repair utilities for model-emitted plain-text tool calls. */
 export {
   parseStandalonePlainTextToolCallBlocks,
-  scanPlainTextToolCall,
   stripPlainTextToolCallBlocks,
   type PlainTextToolCallBlock,
-  type PlainTextToolCallScan,
 } from "./payload.js";
 export {
   type PlainTextToolCallNameMatcher,

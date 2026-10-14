@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import * as toolCallRepair from "../../packages/tool-call-repair/src/index.js";
 import type { AssistantMessage } from "../llm/types.js";
 import * as codeRegions from "../shared/text/code-regions.js";
 import { consumePendingAssistantReplyDirectivesIntoReply } from "./embedded-agent-subscribe.handlers.messages.replies.js";
@@ -58,41 +59,6 @@ describe.each(["ollama", "anthropic-messages", "openai-completions", "openai-res
         expect(context.state.assistantStream?.text).toBe(source.trimEnd());
         const parsedCharacters = regions.mock.calls.reduce(
           (total, [parsed]) => total + parsed.length,
-          0,
-        );
-        expect(parsedCharacters).toBeLessThan(source.length * 8);
-      } finally {
-        regions.mockRestore();
-      }
-    });
-
-    it("bounds Markdown parse work for bracket-led prose in token-sized deltas", async () => {
-      const context = createMessageUpdateContext();
-      const source = [
-        "Here is the summary.",
-        ...Array.from(
-          { length: 600 },
-          (_value, index) => `[${index + 1}] Ordinary sentence with words and periods.`,
-        ),
-        "",
-      ].join("\n");
-      const regions = vi.spyOn(codeRegions, "findCodeRegions");
-      try {
-        let text = "";
-        for (let offset = 0; offset < source.length; offset += 4) {
-          const delta = source.slice(offset, offset + 4);
-          text += delta;
-          const partial = message(text);
-          await updateMessage(context, {
-            message: partial,
-            assistantMessageEvent: { type: "text_delta", delta, partial, contentIndex: 0 },
-          });
-        }
-        expect(context.state.assistantStream?.text).toBe(source.trimEnd());
-        // Snapshot sanitizing parses only per-block slices; re-parsing the whole reply per
-        // delta shows up as calls on a large share of the reply.
-        const parsedCharacters = regions.mock.calls.reduce(
-          (total, [parsed]) => total + (parsed.length * 2 >= source.length ? parsed.length : 0),
           0,
         );
         expect(parsedCharacters).toBeLessThan(source.length * 8);
@@ -195,3 +161,44 @@ describe.each(["ollama", "anthropic-messages", "openai-completions", "openai-res
     );
   },
 );
+
+it("bounds plain-tool-call parse work for citation replies in token-sized deltas", async () => {
+  const context = createMessageUpdateContext();
+  const source = [
+    "Here is the summary.",
+    ...Array.from(
+      { length: 600 },
+      (_value, index) => `[${index + 1}] Ordinary sentence with words and periods.`,
+    ),
+    "",
+  ].join("\n");
+  const strip = vi.spyOn(toolCallRepair, "stripPlainTextToolCallBlocks");
+  try {
+    let text = "";
+    for (let offset = 0; offset < source.length; offset += 4) {
+      const delta = source.slice(offset, offset + 4);
+      text += delta;
+      const partial: AssistantMessage = {
+        role: "assistant",
+        api: "openai-responses",
+        provider: "fixture",
+        model: "fixture",
+        usage: createZeroUsageFixture(),
+        timestamp: 0,
+        stopReason: "stop",
+        phase: "final_answer",
+        content: [{ type: "text", text }],
+      };
+      await updateMessage(context, {
+        message: partial,
+        assistantMessageEvent: { type: "text_delta", delta, partial, contentIndex: 0 },
+      });
+    }
+    expect(context.state.assistantStream?.text).toBe(source.trimEnd());
+    // Count the canonical precheck too: ordinary citations no longer require Markdown parsing.
+    const parsedCharacters = strip.mock.calls.reduce((total, [parsed]) => total + parsed.length, 0);
+    expect(parsedCharacters).toBeLessThan(source.length * 8);
+  } finally {
+    strip.mockRestore();
+  }
+});
