@@ -647,6 +647,59 @@ describe("normalizePlainTextToolCallStreamEvents protected ranges", () => {
   });
 });
 
+describe("normalizePlainTextToolCallStreamEvents calls after visible text", () => {
+  const leading = '[tool:read]\n{"path":"a"}\n';
+  const trailing = '[tool:read]\n{"path":"b"}\n';
+
+  it.each<[string, string[], string]>([
+    [
+      "hides a second call after prose delivered in one chunk",
+      [`${leading}Done.\n${trailing}`],
+      "Done.\n",
+    ],
+    [
+      "hides a second call after prose completed by a later chunk",
+      [`${leading}Done.\n`, trailing],
+      "Done.\n",
+    ],
+    [
+      "hides a second call completed by a later chunk mid-marker",
+      [`${leading}Done.\n[tool:re`, 'ad]\n{"path":"b"}\n'],
+      "Done.\n",
+    ],
+    [
+      "hides a second call completed by a later chunk mid-payload",
+      [`${leading}Done.\n[tool:read]\n{"path":"b`, '"}\n'],
+      "Done.\n",
+    ],
+    [
+      "hides a second call split from the first by a stray closing tag",
+      [`${leading}[/tool]\n${trailing}`],
+      "[/tool]\n",
+    ],
+  ])("%s", async (_name, chunks, visible) => {
+    const text = chunks.join("");
+    const events = await normalize([
+      ...chunks.map((chunk) => streamTextDelta(chunk)),
+      doneAssistantEvent("stop", textContent(text), "stop"),
+    ]);
+    expect(textDeltas(events).join("")).toBe(visible);
+    expect(JSON.stringify(events)).not.toContain('{"path":"b"}');
+    expectTerminalContent(events, "done", textContent(visible));
+    const unsplit = await normalize([
+      streamTextDelta(text),
+      doneAssistantEvent("stop", textContent(text), "stop"),
+    ]);
+    expect(textDeltas(unsplit).join("")).toBe(visible);
+    expect(JSON.stringify(unsplit)).not.toContain('{"path":"b"}');
+  });
+
+  it("keeps an unfinished second call private at end of stream", async () => {
+    const events = await normalize([streamTextDelta(`${leading}Done.\n[tool:read`)]);
+    expect(JSON.stringify(events)).not.toContain("[tool:read");
+  });
+});
+
 describe("normalizePlainTextToolCallStreamEvents trim replay ordering", () => {
   it("drains buffered reasoning when a terminal trim clears the candidate", async () => {
     const prefix = `[read]${" ".repeat(300)}`;

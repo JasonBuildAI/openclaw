@@ -813,7 +813,19 @@ function classifyPending(
     if (!finalize && tailScan.kind === "prefix" && !scannedCall(tailScan)) {
       return { kind: "pending" };
     }
-    return { kind: "stripped", text: createRangeRemover([leading])(candidate.text) };
+    if (!finalize && sequences.some((sequence) => sequence.activeStart !== undefined)) {
+      // The tail holds an unfinished call of its own ("[tool:read" plus "...]") that the
+      // terminal projection hides, so keep it buffered instead of replaying it early.
+      return { kind: "pending" };
+    }
+    if (!finalize && findTrailingCallPrefix(candidate, matcher, resolveProtectedRanges)) {
+      // A tail marker such as "[to" can still complete into a call the terminal projection
+      // hides; replaying it here would leak half a call and then the rest mid-buffer.
+      return { kind: "pending" };
+    }
+    // The tail can hold complete call text of its own plus the prose around it. The terminal
+    // projection hides every call sequence, so strip them all instead of replaying them.
+    return { kind: "stripped", text: createRangeRemover(sequences)(candidate.text) };
   }
   if (leading && leading.activeStart === undefined) {
     return pending.sequenceOverCap || pending.bufferBytes > MAX_PAYLOAD_BYTES
