@@ -31,6 +31,11 @@ const INTERNAL_COMPACT_COMMAND_TRACE_LINE_RE =
 const INTERNAL_CHANNEL_TRACE_LINE_RE =
   /^(?:>\s*)?(?:tool[-_ ]?call|tool[-_ ]?result|function[-_ ]?call)\s*[:=]/i;
 
+// Only a line head can begin a trace line above, so the scrub is probed where one can
+// start: indentation, an optional quote, and an optional warning glyph.
+const INTERNAL_TRACE_LINE_HEAD_QUICK_RE =
+  /^[^\S\n]*(?:>[^\S\n]*)?(?:⚠️[^\S\n]*)?(?:📊|🛠️|📖|📝|🔍|🔎|⚙️|(?:tool[-_ ]?call|tool[-_ ]?result|function[-_ ]?call)[^\S\n]*[:=])/im;
+
 /**
  * Strip malformed Minimax tool invocations that leak into text content.
  * Minimax sometimes embeds tool calls as XML in text blocks instead of
@@ -292,8 +297,32 @@ export const legacyBracketToolCallTextFilter: TextFilter = {
 
 export const assistantTraceTextFilter: TextFilter = {
   transform: stripAssistantInternalTraceLines,
-  activationTokens: ["tool", "function", "📊", "🛠", "📖", "📝", "🔍", "🔎", "⚙"],
+  create: createAssistantTraceProjector,
 };
+
+/**
+ * The scrub removes whole lines and only a line head can begin a trace line, so a reply
+ * that never starts a line with one can never change. Probing the previous unterminated
+ * line plus the appended lines keeps each delta bounded by those lines instead of the
+ * whole accumulated reply.
+ */
+function createAssistantTraceProjector() {
+  let probeFrom = 0;
+  let active = false;
+  return createConditionalTextProjector(stripAssistantInternalTraceLines, (input) => {
+    if (active) {
+      return true;
+    }
+    // A replacement owns the whole snapshot; an appended delta only extends the last line.
+    const from = input.delta === null ? 0 : probeFrom;
+    active = INTERNAL_TRACE_LINE_HEAD_QUICK_RE.test(input.text.slice(from));
+    probeFrom =
+      input.delta !== null && input.delta.includes("\n")
+        ? input.text.length - input.delta.length + input.delta.lastIndexOf("\n") + 1
+        : from;
+    return active;
+  });
+}
 
 export const plainToolCallTextFilter: TextFilter = {
   transform: (text) =>

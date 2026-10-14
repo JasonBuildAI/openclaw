@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   assistantVisibleTextFilters,
   minimaxToolCallTextFilter,
@@ -8,6 +8,7 @@ import {
   stripAssistantInternalScaffolding,
   stripToolCallXmlTags,
 } from "./assistant-visible-text.js";
+import * as codeRegions from "./code-regions.js";
 import { createTextProjection } from "./text-projection.js";
 
 it("keeps an invisible stream pending until visible text arrives and honors replacements", () => {
@@ -288,6 +289,77 @@ describe("sanitizeAssistantVisibleText", () => {
     expect(
       sanitizeAssistantFinalAnswerText("Visible prefix <thinking><internal>private reflection"),
     ).toBe("Visible prefix");
+  });
+});
+
+describe("assistantTraceTextFilter streamed projection", () => {
+  it("bounds trace scrubbing for prose that only mentions tool calls mid-line", () => {
+    const source = [
+      "Here is the plan.",
+      ...Array.from(
+        { length: 1200 },
+        (_value, index) =>
+          `Step ${index}: a helper function call returns the tool call payload for the value.`,
+      ),
+      "",
+    ].join("\n");
+    const scrub = vi.spyOn(codeRegions, "stripLinesOutsideCode");
+    try {
+      const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+      for (let offset = 0; offset < source.length; offset += 4) {
+        projection.append(source.slice(offset, offset + 4));
+      }
+      expect(projection.text).toBe(source.trimEnd());
+      const scrubbedCharacters = scrub.mock.calls.reduce(
+        (total, [scrubbed]) => total + scrubbed.length,
+        0,
+      );
+      expect(scrubbedCharacters).toBeLessThan(source.length * 8);
+    } finally {
+      scrub.mockRestore();
+    }
+  });
+
+  it.each([
+    [
+      "a channel trace line",
+      'Visible intro.\ntool call: read {"path":"a.ts"}\nVisible outro.',
+      "Visible intro.\nVisible outro.",
+    ],
+    [
+      "a warning trace line",
+      "Visible intro.\n⚠️ 🛠️ Exec failed: `x` (exit 1)\nVisible outro.",
+      "Visible intro.\nVisible outro.",
+    ],
+    [
+      "a quoted progress line",
+      "Visible intro.\n> 📊 Session Status: ok\nVisible outro.",
+      "Visible intro.\nVisible outro.",
+    ],
+    [
+      "an indented progress line",
+      "Visible intro.\n   📊 Session Status: ok\nVisible outro.",
+      "Visible intro.\nVisible outro.",
+    ],
+    [
+      "a marker line that is not a trace line",
+      "Visible intro.\n📊 Summary of results\nVisible outro.",
+      "Visible intro.\n📊 Summary of results\nVisible outro.",
+    ],
+  ])("projects %s in token-sized chunks", (_name, source, expected) => {
+    for (const size of [1, 3, 7]) {
+      const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+      let accumulated = "";
+      for (let offset = 0; offset < source.length; offset += size) {
+        const chunk = source.slice(offset, offset + size);
+        accumulated += chunk;
+        projection.append(chunk);
+        expect(projection.text).toBe(
+          sanitizeAssistantVisibleTextWithProfile(accumulated, "delivery", true),
+        );
+      }
+      expect(projection.text).toBe(expected);
+    }
   });
 });
 
