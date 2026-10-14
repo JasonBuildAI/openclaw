@@ -1,8 +1,8 @@
 // Assistant visible text helpers strip hidden reasoning and control marker text.
-import { stripPlainTextToolCallBlocks } from "../../../packages/tool-call-repair/src/index.js";
 import { findCodeRegions, isInsideCode, stripLinesOutsideCode } from "./code-regions.js";
 import { downgradedToolCallTextFilter } from "./downgraded-tool-call-text.js";
 import { stripModelSpecialTokens } from "./model-special-tokens.js";
+import { plainToolCallTextFilter } from "./plain-tool-call-text.js";
 import { stripReasoningTagsFromText } from "./reasoning-tags.js";
 import {
   applyTextFilters,
@@ -295,11 +295,7 @@ export const assistantTraceTextFilter: TextFilter = {
   activationTokens: ["tool", "function", "📊", "🛠", "📖", "📝", "🔍", "🔎", "⚙"],
 };
 
-export const plainToolCallTextFilter: TextFilter = {
-  transform: (text) =>
-    stripPlainTextToolCallBlocks(text, { resolveProtectedRanges: findCodeRegions }),
-  activationTokens: ["[", "<function=", "to="],
-};
+export { plainToolCallTextFilter } from "./plain-tool-call-text.js";
 
 export function sanitizeAssistantVisibleTextWithProfile(
   text: string,

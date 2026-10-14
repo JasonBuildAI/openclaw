@@ -66,6 +66,41 @@ describe.each(["ollama", "anthropic-messages", "openai-completions", "openai-res
       }
     });
 
+    it("bounds Markdown parse work for bracket-led prose in token-sized deltas", async () => {
+      const context = createMessageUpdateContext();
+      const source = [
+        "Here is the summary.",
+        ...Array.from(
+          { length: 600 },
+          (_value, index) => `[${index + 1}] Ordinary sentence with words and periods.`,
+        ),
+        "",
+      ].join("\n");
+      const regions = vi.spyOn(codeRegions, "findCodeRegions");
+      try {
+        let text = "";
+        for (let offset = 0; offset < source.length; offset += 4) {
+          const delta = source.slice(offset, offset + 4);
+          text += delta;
+          const partial = message(text);
+          await updateMessage(context, {
+            message: partial,
+            assistantMessageEvent: { type: "text_delta", delta, partial, contentIndex: 0 },
+          });
+        }
+        expect(context.state.assistantStream?.text).toBe(source.trimEnd());
+        // Snapshot sanitizing parses only per-block slices; re-parsing the whole reply per
+        // delta shows up as calls on a large share of the reply.
+        const parsedCharacters = regions.mock.calls.reduce(
+          (total, [parsed]) => total + (parsed.length * 2 >= source.length ? parsed.length : 0),
+          0,
+        );
+        expect(parsedCharacters).toBeLessThan(source.length * 8);
+      } finally {
+        regions.mockRestore();
+      }
+    });
+
     it("keeps markup context across adjacent text and whitespace blocks", () => {
       const partial = message("");
       partial.content = [
