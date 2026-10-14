@@ -464,6 +464,92 @@ describe("normalizePlainTextToolCallStreamEvents", () => {
     ]);
     expect(events).toEqual([]);
   });
+
+  const bracketProseLine = "  [read] docs/getting-started.md\n";
+  const denseBracketProse = bracketProseLine.repeat(768);
+  const chunkDeltas = (text: string, size: number) =>
+    Array.from({ length: Math.ceil(text.length / size) }, (_, index) =>
+      text.slice(index * size, (index + 1) * size),
+    );
+
+  it("bounds bracket-prose rescans per delta (#169172)", async () => {
+    let nameChecks = 0;
+    const countingMatcher: PlainTextToolCallNameMatcher = {
+      hasExactName: (name) => {
+        nameChecks += 1;
+        return name === "read";
+      },
+      hasNamePrefix: (prefix) => {
+        nameChecks += 1;
+        return "read".startsWith(prefix);
+      },
+    };
+    const chunks = chunkDeltas(denseBracketProse, 64);
+    const events = await collectNormalizedEvents(
+      [
+        ...cumulativeDeltas(...chunks),
+        doneAssistantEvent("stop", textContent(denseBracketProse), "stop"),
+      ],
+      {
+        matcher: countingMatcher,
+        createPromotedToolCallEvents: () => [],
+        normalizeTerminalMessage: ({ message, preserveEmptyTextBlocks }) => {
+          const scrubbed = projectScrubbedPlainTextToolCallMessage({
+            matcher: countingMatcher,
+            message,
+            preserveEmptyTextBlocks,
+          });
+          return scrubbed ? { kind: "scrubbed", ...scrubbed } : undefined;
+        },
+      },
+    );
+    expectTerminalContent(events, "done", textContent(denseBracketProse));
+    expect(events.some((event) => String(event.type).startsWith("toolcall_"))).toBe(false);
+    // A prose line that merely opens with a tool name used to be re-scanned on every later
+    // delta, which cost ~280k name checks for this 25 KB answer; re-checking only the text a
+    // delta adds keeps that near one check per line the answer is long.
+    expect(nameChecks).toBeLessThanOrEqual(chunks.length * 300);
+  });
+
+  it("strips a call that follows bracket-dense prose (#169172)", async () => {
+    const call = '[read]\n{"path":"secret.md"}\n[/read]\n';
+    const text = bracketProseLine.repeat(64) + call;
+    const events = await normalize([
+      ...cumulativeDeltas(...chunkDeltas(text, 64)),
+      doneAssistantEvent("stop", textContent(text), "stop"),
+    ]);
+    expect(textDeltas(events).join("")).toContain("docs/getting-started.md");
+    expect(JSON.stringify(events)).not.toContain("secret.md");
+    expect(JSON.stringify(events)).not.toContain("[/read]");
+  });
+
+  it("keeps a marker line private until a later payload completes it (#169172)", async () => {
+    const prose = bracketProseLine.repeat(64);
+    const marker = "  [read]\n";
+    const payload = '{"path":"secret.md"}';
+    const events = await normalize([
+      ...cumulativeDeltas(...chunkDeltas(prose, 64)),
+      textDelta(marker, prose + marker),
+      textDelta(payload, prose + marker + payload),
+      textDelta("\n[/read]\n", prose + marker + payload + "\n[/read]\n"),
+      doneAssistantEvent("stop", textContent(prose + marker + payload + "\n[/read]\n"), "stop"),
+    ]);
+    expect(textDeltas(events).join("")).toContain("docs/getting-started.md");
+    expect(JSON.stringify(events)).not.toContain("secret.md");
+  });
+
+  it("strips a candidate whose payload arrives in a second content block (#169172)", async () => {
+    const prose = bracketProseLine.repeat(32);
+    const candidate = '  [read]\n{"path":"secret.md"}\n';
+    const events = await normalize([
+      partialDelta(prose, 0, prose),
+      partialDelta(candidate, 1, prose, candidate),
+      doneAssistantEvent("stop", textContent(prose, `${candidate}[/read]\n`), "stop"),
+    ]);
+    expect(JSON.stringify(events)).not.toContain("secret.md");
+    expect(JSON.stringify(events)).not.toContain('{"path"');
+    expect(textDeltas(events).join("")).toContain("docs/getting-started.md");
+  });
 });
 
 const literalCall = '[read]\n{"path":"x"}\n[/read]\n';

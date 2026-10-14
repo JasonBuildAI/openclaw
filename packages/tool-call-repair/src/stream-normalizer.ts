@@ -54,6 +54,9 @@ export type PlainTextToolCallStreamNormalizerOptions = {
 };
 
 const MAX_PENDING_EVENTS = 256;
+// Bound on how much text a single scrub-free re-check may walk before it gives up on the fast
+// path (see scrubProjectionIsProvablyEmpty).
+const MAX_FAST_PATH_TAIL_CHARS = 4_096;
 // Retain bounded visible history only for split Markdown ownership; terminal snapshots stay canonical.
 const MAX_PROTECTION_CONTEXT_CHARS = 1_000_000;
 
@@ -984,11 +987,120 @@ export async function* normalizePlainTextToolCallStreamEvents(
     return result.slice(0, length);
   };
 
+  // A snapshot whose scans carry no call and no completable prefix cannot produce a scrub
+  // projection, so re-scrubbing the whole buffer for every delta of a long answer is pure
+  // waste. A call can only start at a line start an accepted scan reports, and text appended
+  // later cannot revive a rejected candidate, so a growing snapshot only needs the tail after
+  // its last unresolved line re-checked. Scrub sites hand over slightly different snapshots of
+  // the same stream, so a few remembered scans let each of them resume instead of starting over.
+  const MAX_REMEMBERED_SCANS = 4;
+  const REMEMBERED_SCAN_TAIL_CHARS = 64;
+  type RememberedSequenceScan = {
+    anchor: number;
+    length: number;
+    tail: string;
+    text: string;
+  };
+  const rememberedScans: RememberedSequenceScan[] = [];
+  let lastScrubbedText = "";
+  let lastScrubbedEmpty = false;
+  let sequenceScanBlocked = false;
+  const rememberSequenceScan = (anchor: number, text: string) => {
+    const tail =
+      text.length <= REMEMBERED_SCAN_TAIL_CHARS ? text : text.slice(-REMEMBERED_SCAN_TAIL_CHARS);
+    const previous = rememberedScans.findIndex(
+      (state) => state.length === text.length && state.tail === tail,
+    );
+    if (previous !== -1) {
+      rememberedScans.splice(previous, 1);
+    }
+    rememberedScans.push({ anchor, length: text.length, tail, text });
+    if (rememberedScans.length > MAX_REMEMBERED_SCANS) {
+      rememberedScans.shift();
+    }
+  };
+  // A continuation repeats the remembered tail, so comparing that first keeps long snapshots
+  // from paying a full comparison per delta (comparing full snapshots is what makes the whole
+  // re-check expensive, see the quadratic-scrub regression this fast path exists for).
+  const continuesSequenceScan = (state: RememberedSequenceScan, text: string) =>
+    state.length <= text.length &&
+    (state.length <= REMEMBERED_SCAN_TAIL_CHARS ||
+      text.slice(state.length - REMEMBERED_SCAN_TAIL_CHARS, state.length) === state.tail) &&
+    text.slice(0, state.length) === state.text;
+  const scrubProjectionIsProvablyEmpty = (value: unknown): boolean => {
+    if (sequenceScanBlocked) {
+      return false;
+    }
+    const candidate = extractStandaloneCandidate(value);
+    if (!candidate) {
+      return true;
+    }
+    const text = candidate.text;
+    if (text === lastScrubbedText) {
+      return lastScrubbedEmpty;
+    }
+    let resume = 0;
+    let resumedFrom = -1;
+    for (const state of rememberedScans) {
+      if (state.length > resumedFrom && continuesSequenceScan(state, text)) {
+        resume = Math.min(state.anchor, text.length);
+        resumedFrom = state.length;
+      }
+    }
+    // A snapshot that continues none of the remembered scans would be walked from its start,
+    // which costs more than the scrub it avoids once the text is long.
+    if (resumedFrom === -1 && text.length > MAX_FAST_PATH_TAIL_CHARS) {
+      return false;
+    }
+    // An unresolved candidate that stays open keeps the tail growing, and re-walking it every
+    // delta is the quadratic cost this fast path exists to avoid, so give up on the stream.
+    if (text.length - resume > MAX_FAST_PATH_TAIL_CHARS) {
+      sequenceScanBlocked = true;
+      return false;
+    }
+    const view = createCandidateScanView(candidate);
+    const boundarySet = view.boundaries.length === 0 ? undefined : new Set(view.boundaries);
+    for (let index = resume; index < view.text.length; index += 1) {
+      const lineStart =
+        index === 0 ||
+        view.text[index - 1] === "\n" ||
+        view.text[index - 1] === "\r" ||
+        boundarySet?.has(index) === true;
+      if (!lineStart) {
+        continue;
+      }
+      const scan = scanPlainTextToolCall(view.text, skipLineIndentation(view.text, index), {
+        matcher: options.matcher,
+        maxPayloadBytes: MAX_PAYLOAD_BYTES,
+        structuralLineBreaks: view.structuralLineBreaks,
+      });
+      if (scannedCall(scan)) {
+        // A call stays in every later snapshot of this stream, where the scrub can never be
+        // skipped again.
+        sequenceScanBlocked = true;
+        return false;
+      }
+      if (scan.kind !== "invalid") {
+        lastScrubbedText = text;
+        lastScrubbedEmpty = false;
+        rememberSequenceScan(index, view.text);
+        return false;
+      }
+    }
+    lastScrubbedText = text;
+    lastScrubbedEmpty = true;
+    rememberSequenceScan(view.text.length, view.text);
+    return true;
+  };
+
   const scrubSnapshot = (
     value: unknown,
     preserveEmptyTextBlocks = false,
     forceKnownCandidates = false,
   ) => {
+    if (scrubProjectionIsProvablyEmpty(value)) {
+      return undefined;
+    }
     const forced = forceKnownCandidates
       ? projectScrubbedPlainTextToolCallMessage({
           forceKnownCandidates: true,
