@@ -1,6 +1,6 @@
 import type { CronJob, CronScratchGetResult } from "../../api/types.ts";
 import type { ApplicationContext } from "../../app/context.ts";
-import { readGatewayOperatorAccess } from "../../app/operator-access.ts";
+import { hasOperatorReadAccess, readGatewayOperatorAccess } from "../../app/operator-access.ts";
 import { showConfirmDialog } from "../../components/confirm-dialog.ts";
 import { registerCronEnglish } from "../../i18n/locales/en-cron.ts";
 import { watchAgentScope, watchSelectedAgent } from "../../lib/agents/index.ts";
@@ -31,15 +31,20 @@ import type { CronFormState, CronState } from "../../lib/cron/types.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { isGatewayAvailable } from "../../lib/gateway-availability.ts";
 import { createGatewayConnectionLifecycle } from "../../lib/gateway-connection-lifecycle.ts";
-import { modelCatalogEventInvalidation } from "../../lib/model-catalog-cache.ts";
-import { loadModelCatalog, modelCatalogRefreshError } from "../../lib/model-catalog-store.ts";
+import { formatMissingOperatorReadScopeMessage } from "../../lib/gateway-errors.ts";
+import { modelCatalogKey, modelCatalogParams } from "../../lib/model-catalog-cache.ts";
+import {
+  loadModelCatalog,
+  modelCatalogRefreshError,
+  subscribeModelCatalogCache,
+} from "../../lib/model-catalog-store.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
 import {
   DeliveryConversationsController,
   invalidateStaleDeliveryRoute,
   requiresDirectoryReload,
 } from "./delivery-conversations.ts";
-import { resolveCronRouteData } from "./route-model.ts";
+import { CronRouteSelection, resolveCronRouteData } from "./route-model.ts";
 import { CronRunTranscript } from "./run-transcript.tsx";
 import type { CronDetailTab, CronListTab, CronProps } from "./view-types.ts";
 
@@ -84,10 +89,10 @@ export class CronPageController {
   }
 
   readonly runTranscript: CronRunTranscript;
-  private pendingRouteData: ReturnType<typeof resolveCronRouteData> | null = null;
-  private routeJobRequested = false;
+  private readonly routeSelection = new CronRouteSelection();
   private pendingRunScroll = false;
   private modelSuggestionsRequest: { state: CronState; agentId: string } | null = null;
+  private stopModelSuggestions: (() => void) | undefined;
   readonly deliveryDirectory = new DeliveryConversationsController({
     currentCronState: () => this.cron,
     canManage: () => this.canManageCron,
@@ -112,7 +117,7 @@ export class CronPageController {
       this.publish();
       return;
     }
-    this.pendingRouteData = null;
+    this.routeSelection.target = null;
     // Replacing the owner retires results from the previous agent scope.
     this.resetGatewayState(this.context.gateway.snapshot);
     this.cron.cronAgentId = scopeId;
@@ -145,13 +150,20 @@ export class CronPageController {
       }
       const snapshot = context.gateway.snapshot;
       const previousConnected = this.gateway.capture() !== null;
-      const changed = this.gateway.transition(snapshot);
+      const presentationChanged = this.routeSelection.bind(context.gateway);
+      const changed = this.gateway.transition(snapshot) || presentationChanged;
+      if (presentationChanged) {
+        this.gateway.invalidate();
+      }
       const nextAvailable = isGatewayAvailable(snapshot);
       if (first || changed) {
         this.resetGatewayState(snapshot);
       } else if (!readGatewayOperatorAccess(snapshot).canAdmin) {
         this.clearHeartbeatScratch();
         this.deliveryDirectory.clear();
+      }
+      if (!hasOperatorReadAccess(snapshot.hello?.auth ?? null)) {
+        this.cron.cronJobsError = formatMissingOperatorReadScopeMessage("scheduled tasks");
       }
       if (snapshot.phase === "connected" && (first || changed)) {
         this.ensureInitialData();
@@ -178,8 +190,6 @@ export class CronPageController {
         if (this.active && this.context === context) {
           if (event.event === "cron") {
             void this.refreshCron({ coalesce: true });
-          } else if (modelCatalogEventInvalidation(event)) {
-            void this.loadModelSuggestions(this.cron);
           }
         }
       }),
@@ -196,8 +206,15 @@ export class CronPageController {
   };
 
   activate() {
+    if (!this.active) {
+      return;
+    }
     document.addEventListener("visibilitychange", this.onActivation);
     globalThis.addEventListener("focus", this.onActivation);
+    // Solid constructs the host before insertion, so its cold read starts after attachment.
+    if (!this.cron.cronStatus && !this.cron.cronLoading) {
+      this.ensureInitialData();
+    }
   }
 
   dispose() {
@@ -221,6 +238,8 @@ export class CronPageController {
   }
 
   private resetGatewayState(snapshot: ApplicationContext["gateway"]["snapshot"]) {
+    this.stopModelSuggestions?.();
+    this.stopModelSuggestions = undefined;
     this.runTranscript.close();
     this.clearHeartbeatScratch();
     invalidateCronRefresh(this.cron);
@@ -233,7 +252,7 @@ export class CronPageController {
     this.cron = cron;
     const routeData = resolveCronRouteData(this.routeSearch);
     cron.cronSessionFilter = routeData.session;
-    this.routeJobRequested = false;
+    this.routeSelection.requested = false;
     this.pageHidden = document.visibilityState === "hidden";
     this.cron.cronAgentId = this.context.agentSelection.state.scopeId;
     this.cronModelSuggestions = [];
@@ -248,6 +267,7 @@ export class CronPageController {
       this.host.isConnected &&
       this.cron === cron &&
       isGatewayAvailable(this.context.gateway.snapshot) &&
+      hasOperatorReadAccess(this.context.gateway.snapshot.hello?.auth ?? null) &&
       document.visibilityState !== "hidden"
     );
   }
@@ -291,8 +311,8 @@ export class CronPageController {
     }
     this.listTab = "tasks";
     this.detailTab = "settings";
-    this.pendingRouteData = routeData.jobId || routeData.session ? routeData : null;
-    this.routeJobRequested = false;
+    this.routeSelection.target = routeData.jobId || routeData.session ? routeData : null;
+    this.routeSelection.requested = false;
     this.cron.cronRunsRunId = null;
     this.pendingRunScroll = false;
     this.publish();
@@ -315,36 +335,23 @@ export class CronPageController {
   }
 
   afterRender() {
-    const routeData = this.pendingRouteData;
+    const routeData = this.routeSelection.target;
     const client = this.cron.client;
     if (routeData?.session && this.cron.cronJobsSnapshotRevision && !this.cron.cronLoading) {
-      this.pendingRouteData = null;
+      this.routeSelection.target = null;
       const [job] = this.cron.cronJobs;
       if (this.cron.cronJobsTotal === 1 && job) {
         this.selectJob(job);
       }
     }
-    if (routeData?.jobId && client && this.cron.connected && !this.routeJobRequested) {
-      this.routeJobRequested = true;
-      void this.runCronTask(async (current) => {
-        const isCurrent = () =>
-          this.active &&
-          this.host.isConnected &&
-          this.cron === current &&
-          this.pendingRouteData === routeData;
-        try {
-          // Links identify an exact job; a filtered inventory page cannot resolve them.
-          const job = await client.request<CronJob>("cron.get", { id: routeData.jobId });
-          if (isCurrent()) {
-            this.selectJob(job, routeData.runId);
-          }
-        } catch (error) {
-          if (isCurrent()) {
-            this.pendingRouteData = null;
-            current.cronError = formatUiError(error);
-          }
-        }
-      });
+    if (routeData?.jobId && client && this.cron.connected && !this.routeSelection.requested) {
+      void this.runCronTask((current) =>
+        this.routeSelection.resolve(
+          current,
+          () => this.active && this.host.isConnected && this.cron === current,
+          (job, runId) => this.selectJob(job, runId),
+        ),
+      );
     }
     if (this.pendingRunScroll) {
       const run = this.host.querySelector<HTMLElement>(".cron-run-entry--highlighted");
@@ -392,6 +399,17 @@ export class CronPageController {
     if (!client || !agentId || !isGatewayAvailable(this.context.gateway.snapshot)) {
       return;
     }
+    this.stopModelSuggestions ??= subscribeModelCatalogCache(client, (update) => {
+      if (!this.active || this.cron.client !== client || update.type !== "invalidated") {
+        return;
+      }
+      const scope = modelCatalogParams({
+        agentId: this.context.agentSelection.state.selectedId ?? undefined,
+      });
+      if (update.matches(scope, modelCatalogKey(scope))) {
+        void this.loadModelSuggestions(this.cron);
+      }
+    });
     const request = { state: cronState, agentId };
     this.modelSuggestionsRequest = request;
     // Only the latest catalog request may publish rows or errors.
@@ -452,7 +470,7 @@ export class CronPageController {
 
   selectJob(job: CronJob, runId: string | null = null) {
     this.clearHeartbeatScratch();
-    this.pendingRouteData = null;
+    this.routeSelection.select(job.id, runId);
     this.pendingRunScroll = Boolean(runId);
     if (runId) {
       this.detailTab = "history";
@@ -507,7 +525,7 @@ export class CronPageController {
 
   private resetEditor(createOpen: boolean) {
     this.clearHeartbeatScratch();
-    this.pendingRouteData = null;
+    this.routeSelection.target = null;
     // Retire discovery before resetting its editor's form.
     this.deliveryDirectory.retireEditor();
     cancelCronEdit(this.cron, this.context.agentSelection.state.selectedId);
@@ -531,7 +549,7 @@ export class CronPageController {
       return;
     }
     this.clearHeartbeatScratch();
-    this.pendingRouteData = null;
+    this.routeSelection.target = null;
     // A clone is a prefilled create: the editor submits cron.add, not update.
     startCronClone(this.cron, job);
     this.cron.cronCreateOpen = true;
@@ -585,6 +603,9 @@ export class CronPageController {
       // Rejected removals resolve with cronError. Only a confirmed editor exit
       // may retire discovery, preventing late directory errors on the overview.
       if (editorOwnedDiscovery && current.cronEditingJob?.id !== selectedJobId) {
+        if (current === this.cron && this.routeSelection.target?.jobId === selectedJobId) {
+          this.routeSelection.target = null;
+        }
         this.deliveryDirectory.retireExitedEditor(current, connectionScope, editorGeneration);
       }
       // The overview must resume all-job history after removing its selected task.
@@ -617,16 +638,19 @@ export class CronPageController {
       // stays on the captured CronState after navigation.
       const stillEditing = editing || Boolean(cronState.cronEditingJob);
       this.deliveryDirectory.afterSave(cronState, connectionScope, editorGeneration, stillEditing);
-      if (stillEditing) {
+      if (editing) {
         return;
       }
       if (runNow && result.jobId) {
         // Explicit create-and-run intent survives navigation while saving.
         await runCronJob(cronState, result.jobId, "force");
       }
-      cronState.cronCreateOpen = false;
       // Creating returns to the overview's all-job history.
-      if (cronState.cronRunsScope === "job") {
+      if (
+        !cronState.cronEditingJob &&
+        !cronState.cronCreateOpen &&
+        cronState.cronRunsScope === "job"
+      ) {
         await loadCronRunsForJob(cronState, null);
       }
     });
@@ -650,8 +674,14 @@ export class CronPageController {
       onOpenCreate: (patch) => this.openCreate(patch),
       onClosePanel: () => this.closePanel(),
       onClone: (job) => this.cloneJob(job),
-      onToggle: (job, enabled) =>
-        this.runCronAdminTask((cronState) => toggleCronJob(cronState, job, enabled)),
+      onToggle: (job, enabled) => {
+        const scope = this.gateway.capture();
+        const editorGeneration = this.deliveryDirectory.generation;
+        this.runCronAdminTask(async (cronState) => {
+          await toggleCronJob(cronState, job, enabled);
+          this.deliveryDirectory.reconcileRoute(cronState, scope, editorGeneration);
+        });
+      },
       onRun: (job, mode) =>
         this.runCronAdminTask((cronState) => runCronJob(cronState, job.id, mode ?? "force")),
       onRemove: (job) => void this.removeJob(job),
@@ -672,6 +702,9 @@ export class CronPageController {
       onRunsFiltersChange: (patch) =>
         void this.runCronTask(async (cronState) => {
           updateCronRunsFilter(cronState, patch);
+          if (patch.cronRunsRunId !== undefined && cronState.cronEditingJob) {
+            this.routeSelection.select(cronState.cronEditingJob.id, patch.cronRunsRunId);
+          }
           await loadCronRuns(cronState);
         }),
       onViewRunTranscript: (entry, trigger) => void this.runTranscript.open(entry, trigger),
