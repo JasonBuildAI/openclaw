@@ -115,7 +115,21 @@ describe("normalizePlainTextToolCallStreamEvents", () => {
     const unsplit = await normalize([
       streamTextDelta(source.map((event) => event.delta as string).join("")),
     ]);
-    expect(textDeltas(events)).toEqual(textDeltas(unsplit));
+    expect(textDeltas(unsplit)).toEqual(visible);
+  });
+
+  it.each([
+    ["<function=read>", "</function>"],
+    ["<|channel|>commentary", ' to=read code<|message|>{"path":"a"}'],
+  ])("keeps every opening-marker split private for %s", async (marker, tail) => {
+    const firstCall = '[tool:read]\n{"path":"a"}';
+    for (let split = 1; split < marker.length; split += 1) {
+      const events = await normalizeTextDeltas(
+        firstCall + marker.slice(0, split),
+        marker.slice(split) + tail,
+      );
+      expect(textDeltas(events)).toEqual([]);
+    }
   });
 
   it.each([
@@ -123,21 +137,25 @@ describe("normalizePlainTextToolCallStreamEvents", () => {
       "replays a false prefix that a cumulative text_end completes",
       "hello\n[read]\n{}",
       "hello\n[read]\n{}\nX\n  ",
+      "hello\n[read]\n{}\nX\n  ",
     ],
     [
       "hides a split function marker completed only by a cumulative text_end",
       "hello\n[read]\n{}",
       "hello\n[read]\n{}\n<function=read>",
+      "hello\n[read]\n{}\n",
     ],
     [
       "hides a split function call completed only by a cumulative text_end",
       "hello\n[read]\n{}",
       "hello\n[read]\n{}\n<function=read></function>",
+      "hello\n[read]\n{}\n",
     ],
-  ])("%s", async (_name, delta, full) => {
+  ])("%s", async (_name, delta, full, visible) => {
     const split = await normalize([streamTextDelta(delta), textEnd(full)]);
     const unsplit = await normalize([streamTextDelta(full), textEnd(full)]);
-    expect(textDeltas(split).join("")).toBe(textDeltas(unsplit).join(""));
+    expect(textDeltas(split).join("")).toBe(visible);
+    expect(textDeltas(unsplit).join("")).toBe(visible);
     expect(eventTypes(split).includes("text_end")).toBe(eventTypes(unsplit).includes("text_end"));
     expect(JSON.stringify(split)).not.toContain("<function=read>");
   });
