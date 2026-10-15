@@ -6,6 +6,10 @@ export {
   type PlainTextToolCallBlock,
 } from "./payload.js";
 export {
+  createPlainTextToolCallStripProbe,
+  type PlainTextToolCallStripProbe,
+} from "./plain-tool-call-strip-probe.js";
+export {
   type PlainTextToolCallNameMatcher,
   type PlainTextToolCallParseOptions,
   type PlainTextToolCallProtectedRange,

@@ -1,5 +1,8 @@
 // Assistant visible text helpers strip hidden reasoning and control marker text.
-import { stripPlainTextToolCallBlocks } from "../../../packages/tool-call-repair/src/index.js";
+import {
+  createPlainTextToolCallStripProbe,
+  stripPlainTextToolCallBlocks,
+} from "../../../packages/tool-call-repair/src/index.js";
 import { findCodeRegions, isInsideCode, stripLinesOutsideCode } from "./code-regions.js";
 import { downgradedToolCallTextFilter } from "./downgraded-tool-call-text.js";
 import { stripModelSpecialTokens } from "./model-special-tokens.js";
@@ -295,10 +298,23 @@ export const assistantTraceTextFilter: TextFilter = {
   activationTokens: ["tool", "function", "📊", "🛠", "📖", "📝", "🔍", "🔎", "⚙"],
 };
 
+/** The canonical strip owners keep syntax, code protection, and later corrections. */
+function stripPlainToolCallBlocksFromVisibleText(text: string): string {
+  return stripPlainTextToolCallBlocks(text, { resolveProtectedRanges: findCodeRegions });
+}
+
 export const plainToolCallTextFilter: TextFilter = {
-  transform: (text) =>
-    stripPlainTextToolCallBlocks(text, { resolveProtectedRanges: findCodeRegions }),
-  activationTokens: ["{", "<parameter=", "<function=", "to="],
+  transform: stripPlainToolCallBlocksFromVisibleText,
+  // Payload openers (`{`) occur in every code block, so token activation re-ran the canonical
+  // transform on every delta even when the visible text never changed. The streamed probe proves
+  // identity from strip anchors instead and hands the canonical transform back the moment one can
+  // remove text.
+  create: () => {
+    const probe = createPlainTextToolCallStripProbe();
+    return createConditionalTextProjector(stripPlainToolCallBlocksFromVisibleText, ({ text }) =>
+      probe.hasStripCandidate(text),
+    );
+  },
 };
 
 export function sanitizeAssistantVisibleTextWithProfile(
