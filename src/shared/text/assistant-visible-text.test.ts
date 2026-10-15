@@ -298,14 +298,13 @@ describe("assistantTraceTextFilter streamed projection", () => {
       .fill("A helper function call returns the tool call payload for the value.")
       .join(separator);
     const projection = createTextProjection([assistantTraceTextFilter]);
-    const test = RegExp.prototype.test;
     let testedCharacters = 0;
     const probe = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (
       this: RegExp,
       text,
     ) {
       testedCharacters += text.length;
-      return test.call(this, text);
+      return this.exec(text) !== null;
     });
     try {
       for (let offset = 0; offset < source.length; offset += 4) {
