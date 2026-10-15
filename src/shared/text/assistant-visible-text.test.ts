@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  assistantTraceTextFilter,
   assistantVisibleTextFilters,
   minimaxToolCallTextFilter,
   sanitizeAssistantFinalAnswerText,
@@ -8,7 +9,6 @@ import {
   stripAssistantInternalScaffolding,
   stripToolCallXmlTags,
 } from "./assistant-visible-text.js";
-import * as codeRegions from "./code-regions.js";
 import { createTextProjection } from "./text-projection.js";
 
 it("keeps an invisible stream pending until visible text arrives and honors replacements", () => {
@@ -293,31 +293,30 @@ describe("sanitizeAssistantVisibleText", () => {
 });
 
 describe("assistantTraceTextFilter streamed projection", () => {
-  it("bounds trace scrubbing for prose that only mentions tool calls mid-line", () => {
-    const source = [
-      "Here is the plan.",
-      ...Array.from(
-        { length: 1200 },
-        (_value, index) =>
-          `Step ${index}: a helper function call returns the tool call payload for the value.`,
-      ),
-      "",
-    ].join("\n");
-    const scrub = vi.spyOn(codeRegions, "stripLinesOutsideCode");
+  it.each([" ", "\n"])("bounds trace work for prose separated by %j", (separator) => {
+    const source = Array(256)
+      .fill("A helper function call returns the tool call payload for the value.")
+      .join(separator);
+    const projection = createTextProjection([assistantTraceTextFilter]);
+    const test = RegExp.prototype.test;
+    let testedCharacters = 0;
+    const probe = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (
+      this: RegExp,
+      text,
+    ) {
+      testedCharacters += text.length;
+      return test.call(this, text);
+    });
     try {
-      const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
       for (let offset = 0; offset < source.length; offset += 4) {
         projection.append(source.slice(offset, offset + 4));
       }
-      expect(projection.text).toBe(source.trimEnd());
-      const scrubbedCharacters = scrub.mock.calls.reduce(
-        (total, [scrubbed]) => total + scrubbed.length,
-        0,
-      );
-      expect(scrubbedCharacters).toBeLessThan(source.length * 8);
     } finally {
-      scrub.mockRestore();
+      probe.mockRestore();
     }
+    expect(projection.text).toBe(source);
+    expect(testedCharacters).toBeGreaterThan(0);
+    expect(testedCharacters).toBeLessThan(source.length * 8);
   });
 
   it.each([
@@ -346,6 +345,21 @@ describe("assistantTraceTextFilter streamed projection", () => {
       "Visible intro.\n📊 Summary of results\nVisible outro.",
       "Visible intro.\n📊 Summary of results\nVisible outro.",
     ],
+    [
+      "trace lines inside fenced code",
+      "Visible intro.\n```text\n> ⚠️ 🛠️ Exec failed\nfunction_call: example\n```\ntool-result: hidden\nVisible outro.",
+      "Visible intro.\n```text\n> ⚠️ 🛠️ Exec failed\nfunction_call: example\n```\nVisible outro.",
+    ],
+    [
+      "a tilde fence split across deltas",
+      "~~~\ntool call: example\n~~~\nVisible outro.",
+      "~~~\ntool call: example\n~~~\nVisible outro.",
+    ],
+    [
+      "unbounded whitespace before a channel delimiter",
+      `Visible intro.\nFUNCTION_CALL${"\t".repeat(80)}= hidden\nVisible outro.`,
+      "Visible intro.\nVisible outro.",
+    ],
   ])("projects %s in token-sized chunks", (_name, source, expected) => {
     for (const size of [1, 3, 7]) {
       const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
@@ -360,6 +374,15 @@ describe("assistantTraceTextFilter streamed projection", () => {
       }
       expect(projection.text).toBe(expected);
     }
+  });
+
+  it("resets rejected line heads when an upstream stage replaces text", () => {
+    const projection = createTextProjection([assistantTraceTextFilter]);
+    expect(projection.append("A tool call in prose.").text).toBe("A tool call in prose.");
+    expect(projection.replace("tool call: hidden\nVisible").text).toBe("Visible");
+    expect(projection.replace("```\ntool call: literal\n```").text).toBe(
+      "```\ntool call: literal\n```",
+    );
   });
 });
 
