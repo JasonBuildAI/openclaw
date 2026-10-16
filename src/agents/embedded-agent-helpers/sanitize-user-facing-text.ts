@@ -24,8 +24,10 @@ import {
   stripLinesOutsideCode,
 } from "../../shared/text/code-regions.js";
 import { stripFinalTags } from "../../shared/text/final-tags.js";
+import { createStreamMarkerAbsence } from "../../shared/text/stream-marker-absence.js";
 import {
   applyTextFilters,
+  createConditionalTextProjector,
   duplicateParagraphTextFilter,
   leadingEmptyLinesTextFilter,
   type TextFilter,
@@ -242,7 +244,21 @@ export function userFacingTextFilters(
 ): readonly TextFilter[] {
   const key = `${errorContext ? "error" : "normal"}${streaming ? "-stream" : ""}` as const;
   return (userFacingFilters[key] ??= [
-    { transform: stripFinalTags, activationTokens: ["<"] },
+    streaming
+      ? {
+          transform: stripFinalTags,
+          create: () => {
+            const markerAbsent = createStreamMarkerAbsence({
+              finalTags: true,
+              reasoningTags: false,
+            });
+            return createConditionalTextProjector(
+              stripFinalTags,
+              (input) => !markerAbsent(input.text),
+            );
+          },
+        }
+      : { transform: stripFinalTags, activationTokens: ["<"] },
     {
       transform: streaming
         ? (text) => stripInternalRuntimeContext(text, { streaming: true })

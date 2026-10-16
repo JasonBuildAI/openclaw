@@ -13,6 +13,7 @@ import {
 import { downgradedToolCallTextFilter } from "./downgraded-tool-call-text.js";
 import { stripModelSpecialTokens } from "./model-special-tokens.js";
 import { stripReasoningTagsFromText } from "./reasoning-tags.js";
+import { createStreamMarkerAbsence } from "./stream-marker-absence.js";
 import {
   applyTextFilters,
   createConditionalTextProjector,
@@ -254,17 +255,28 @@ export function assistantVisibleTextFilters(
       : options?.preserveTrailingWhitespace
         ? "start"
         : "both";
-  const reasoning: TextFilter = {
-    activationTokens: ["<"],
-    transform: (text) =>
-      stripReasoningTagsFromText(text, {
-        mode: preserve ? "preserve" : "strict",
-        scope: profile === "final-answer-delivery" ? "leading" : "all",
-        trim: preserveCodeIndentation ? "none" : trim,
-        // An unfinished stream cannot use terminal malformed-output recovery.
-        recoverUnclosed: !streaming,
-      }),
-  };
+  const transformReasoning = (text: string) =>
+    stripReasoningTagsFromText(text, {
+      mode: preserve ? "preserve" : "strict",
+      scope: profile === "final-answer-delivery" ? "leading" : "all",
+      trim: preserveCodeIndentation ? "none" : trim,
+      // An unfinished stream cannot use terminal malformed-output recovery.
+      recoverUnclosed: !streaming,
+    });
+  // Streaming replies keep the whole-reply scan off the hot path until a marker
+  // appears; one-shot sanitizing keeps the activation token.
+  const reasoning: TextFilter = streaming
+    ? {
+        transform: transformReasoning,
+        create: () => {
+          const markerAbsent = createStreamMarkerAbsence({ finalTags: true, reasoningTags: true });
+          return createConditionalTextProjector(
+            transformReasoning,
+            (input) => !markerAbsent(input.text),
+          );
+        },
+      }
+    : { transform: transformReasoning, activationTokens: ["<"] };
   const filters: TextFilter[] = [
     ...(!preserve ? [minimaxToolCallTextFilter] : []),
     { transform: stripModelSpecialTokens, activationTokens: ["<|", "<｜"] },
