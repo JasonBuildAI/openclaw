@@ -2,6 +2,7 @@ import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coer
 import {
   isOffsetInProtectedRanges,
   type PlainTextToolCallNameMatcher,
+  type PlainTextToolCallProtectedRange,
   type PlainTextToolCallProtectedRangeResolver,
 } from "./contracts.js";
 import { skipLineIndentation, skipWhitespace, utf8ByteLengthWithinLimit } from "./grammar.js";
@@ -56,13 +57,25 @@ export type PlainTextToolCallStreamNormalizerOptions = {
 const MAX_PENDING_EVENTS = 256;
 // Retain bounded visible history only for split Markdown ownership; terminal snapshots stay canonical.
 const MAX_PROTECTION_CONTEXT_CHARS = 1_000_000;
+// Bytes a scrub-reuse suffix may contain: nothing that can start a call construct or open a fence
+// or code span, so an append can neither complete nor extend whatever the previous scan settled
+// (see reuseScrub below). Line breaks stay admitted because a fresh line of these bytes holds no
+// verdict a rescan would change.
+const SCRUB_REUSE_SUFFIX_RE = /[\t\r`~[{<]/u;
+// Bounded per stream: event snapshots and scrubbed snapshots are separate anchor families.
+const MAX_SCRUB_REUSES = 2;
 
 type TextRange = { end: number; start: number };
 type StandalonePlainTextToolCallCandidate = {
   parts: Array<{ contentIndex: number; end: number; start: number }>;
   text: string;
 };
-type ScannedCallSequence = TextRange & { activeStart?: number; overCap: boolean };
+type ScannedCallSequence = TextRange & {
+  activeStart?: number;
+  /** Last call end before the removed line end, so later appends can rebuild {@link TextRange.end}. */
+  callEnd: number;
+  overCap: boolean;
+};
 type CandidatePendingState = {
   buffer: string;
   bufferBytes: number;
@@ -205,6 +218,7 @@ function findCandidateCallSequences(
     let sequenceEnd = callStart;
     let hasOverCap = false;
     let activeStart: number | undefined;
+    let callEnd = callStart;
     let callCount = 0;
     const first = scanPlainTextToolCall(text, callStart, {
       matcher,
@@ -250,6 +264,7 @@ function findCandidateCallSequences(
       }
       callCount += 1;
       hasOverCap ||= call.overCap;
+      callEnd = call.end;
       sequenceEnd = consumeRemovedLineEnd(text, call.end);
       if (call.incomplete) {
         activeStart = callStart;
@@ -283,6 +298,7 @@ function findCandidateCallSequences(
         utf8ByteLengthWithinLimit(text, sequenceStart, sequenceEnd, MAX_PAYLOAD_BYTES) === null;
       sequences.push({
         start: sequenceStart,
+        callEnd,
         end: sequenceEnd,
         ...(activeStart === undefined ? {} : { activeStart }),
         overCap: hasOverCap || aggregateOverCap,
@@ -411,6 +427,9 @@ function projectRangesOntoMessage(
   return { message: { ...record, content }, sourceToProjectedContentIndex };
 }
 
+/** Projection plus the removal ranges it applied, including any open tail (scrub-reuse input). */
+type ScrubProjection = PlainTextToolCallMessageProjection & { ranges: ScannedCallSequence[] };
+
 /** Scrubs unsafe or mixed calls and maps each retained source content block. */
 export function projectScrubbedPlainTextToolCallMessage(params: {
   forceIncompleteCandidates?: boolean;
@@ -420,7 +439,7 @@ export function projectScrubbedPlainTextToolCallMessage(params: {
   preserveEmptyTextBlocks?: boolean;
   resolveProtectedRanges?: PlainTextToolCallProtectedRangeResolver;
   requireAssistantRole?: boolean;
-}): PlainTextToolCallMessageProjection | undefined {
+}): ScrubProjection | undefined {
   const record = asOptionalObjectRecord(params.message);
   const candidate = extractStandaloneCandidate(
     params.message,
@@ -443,7 +462,15 @@ export function projectScrubbedPlainTextToolCallMessage(params: {
       (params.forceIncompleteCandidates && sequence.activeStart !== undefined),
   );
   return ranges.length > 0
-    ? projectRangesOntoMessage(record, candidate, ranges, params.preserveEmptyTextBlocks === true)
+    ? {
+        ...projectRangesOntoMessage(
+          record,
+          candidate,
+          ranges,
+          params.preserveEmptyTextBlocks === true,
+        ),
+        ranges,
+      }
     : undefined;
 }
 
@@ -979,19 +1006,199 @@ export async function* normalizePlainTextToolCallStreamEvents(
     return result.slice(0, length);
   };
 
+  // Future partials snapshot the whole growing reply, and a full scrub re-runs the whole-reply
+  // call scan plus its Markdown protection parse per delta, which is quadratic on the reply
+  // size. A snapshot that only appends bytes the guard below admits cannot start or complete a
+  // call construct, open a fence or code span, or begin a Markdown block line, so every verdict
+  // the previous scrub saw still holds and that scrub's removal ranges still apply. Anything
+  // else re-scans; the terminal snapshot remains authoritative either way.
+  type ScrubReuse = {
+    parts: StandalonePlainTextToolCallCandidate["parts"];
+    ranges: ScannedCallSequence[];
+    text: string;
+    /** The previous scan ended on settled verdicts, so appends cannot revive or extend a call. */
+    settled: boolean;
+  };
+  const scrubReuses: ScrubReuse[] = [];
+
+  // The removed ranges stay valid while every position the scan reads holds a settled verdict:
+  // a hanging prefix is the only verdict an append can extend or resolve, because completing one
+  // needs a marker byte the reuse guard admits nowhere. The checked positions mirror the scan
+  // walk: line starts (including part boundaries) and the continuation points of completed
+  // calls, skipping exactly the positions the walk skips as protected code.
+  const scrubScanIsSettled = (
+    candidate: StandalonePlainTextToolCallCandidate,
+    ranges: readonly ScannedCallSequence[],
+    protectedRanges: readonly PlainTextToolCallProtectedRange[],
+  ): boolean => {
+    if (ranges.length === 0 || ranges.some((range) => range.activeStart !== undefined)) {
+      return false;
+    }
+    const view = createCandidateScanView(candidate);
+    const boundarySet = new Set(view.boundaries);
+    const settled = (start: number): boolean => {
+      if (isOffsetInProtectedRanges(start, protectedRanges)) {
+        return true;
+      }
+      const scan = scanPlainTextToolCall(view.text, start, {
+        matcher: options.matcher,
+        maxPayloadBytes: MAX_PAYLOAD_BYTES,
+        structuralLineBreaks: view.structuralLineBreaks,
+      });
+      // A prefix can still complete, and an unsettled complete still reads the text end for its
+      // trailing line end; both verdicts can change when bytes follow.
+      return scan.kind === "complete" ? scan.settled : scan.kind === "invalid";
+    };
+    for (let index = 0; index < view.text.length; index += 1) {
+      if (
+        index === 0 ||
+        view.text[index - 1] === "\n" ||
+        view.text[index - 1] === "\r" ||
+        boundarySet.has(index)
+      ) {
+        if (!settled(skipLineIndentation(view.text, index))) {
+          return false;
+        }
+      }
+    }
+    for (const range of ranges) {
+      if (!settled(skipWhitespace(view.text, range.end))) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const partsContinueCandidate = (
+    parts: StandalonePlainTextToolCallCandidate["parts"],
+    previous: StandalonePlainTextToolCallCandidate["parts"],
+    suffixLength: number,
+  ): boolean => {
+    if (parts.length === 0 || parts.length !== previous.length) {
+      return false;
+    }
+    for (let index = 0; index + 1 < parts.length; index += 1) {
+      const part = parts[index];
+      const before = previous[index];
+      if (
+        !part ||
+        !before ||
+        part.contentIndex !== before.contentIndex ||
+        part.start !== before.start ||
+        part.end !== before.end
+      ) {
+        return false;
+      }
+    }
+    const last = parts.at(-1);
+    const beforeLast = previous.at(-1);
+    return (
+      last !== undefined &&
+      beforeLast !== undefined &&
+      last.contentIndex === beforeLast.contentIndex &&
+      last.start === beforeLast.start &&
+      last.end - last.start === beforeLast.end - beforeLast.start + suffixLength
+    );
+  };
+
+  const reuseScrub = (
+    candidate: StandalonePlainTextToolCallCandidate,
+    record: Record<string, unknown>,
+    preserveEmptyTextBlocks: boolean,
+  ): ScrubProjection | undefined => {
+    for (const [index, reuse] of scrubReuses.entries()) {
+      if (!reuse.settled || reuse.ranges.length === 0) {
+        continue;
+      }
+      const text = candidate.text;
+      if (text.length <= reuse.text.length || !text.startsWith(reuse.text)) {
+        continue;
+      }
+      const suffix = text.slice(reuse.text.length);
+      if (SCRUB_REUSE_SUFFIX_RE.test(suffix)) {
+        continue;
+      }
+      if (!partsContinueCandidate(candidate.parts, reuse.parts, suffix.length)) {
+        continue;
+      }
+      // Move the anchor forward so the next delta compares only its own bytes. The scan settled
+      // the call ends, but each removed line end is read from the bytes that follow, so rebuild
+      // it against the appended suffix.
+      const ranges = reuse.ranges.map((range) => ({
+        ...range,
+        end: consumeRemovedLineEnd(text, range.callEnd),
+      }));
+      scrubReuses.splice(index, 1);
+      scrubReuses.unshift({ ...reuse, parts: candidate.parts, ranges, text });
+      return {
+        ...projectRangesOntoMessage(record, candidate, ranges, preserveEmptyTextBlocks),
+        ranges,
+      };
+    }
+    return undefined;
+  };
+
+  const rememberScrubReuse = (
+    candidate: StandalonePlainTextToolCallCandidate,
+    projection: ScrubProjection,
+    protectedRanges: readonly PlainTextToolCallProtectedRange[],
+  ): void => {
+    const existing = scrubReuses.findIndex((reuse) => reuse.text === candidate.text);
+    if (existing !== -1) {
+      scrubReuses.splice(existing, 1);
+    }
+    scrubReuses.unshift({
+      parts: candidate.parts,
+      ranges: projection.ranges,
+      text: candidate.text,
+      settled: scrubScanIsSettled(candidate, projection.ranges, protectedRanges),
+    });
+    if (scrubReuses.length > MAX_SCRUB_REUSES) {
+      scrubReuses.length = MAX_SCRUB_REUSES;
+    }
+  };
+
+  const forcedScrubSnapshot = (
+    value: unknown,
+    preserveEmptyTextBlocks: boolean,
+  ): ScrubProjection | undefined => {
+    const candidate = extractStandaloneCandidate(value);
+    const record = asOptionalObjectRecord(value);
+    if (candidate && record) {
+      const reused = reuseScrub(candidate, record, preserveEmptyTextBlocks);
+      if (reused) {
+        return reused;
+      }
+    }
+    // Capture the code ranges this scrub resolves so the reuse guard skips exactly the
+    // positions the call scan skips.
+    let protectedRanges: readonly PlainTextToolCallProtectedRange[] = [];
+    const resolveProtectedRanges = options.resolveProtectedRanges;
+    const projection = projectScrubbedPlainTextToolCallMessage({
+      forceKnownCandidates: true,
+      matcher: options.matcher,
+      message: value,
+      preserveEmptyTextBlocks,
+      resolveProtectedRanges: resolveProtectedRanges
+        ? (text: string) => {
+            protectedRanges = resolveProtectedRanges(text);
+            return protectedRanges;
+          }
+        : undefined,
+    });
+    if (projection && candidate) {
+      rememberScrubReuse(candidate, projection, protectedRanges);
+    }
+    return projection;
+  };
+
   const scrubSnapshot = (
     value: unknown,
     preserveEmptyTextBlocks = false,
     forceKnownCandidates = false,
   ) => {
     const forced = forceKnownCandidates
-      ? projectScrubbedPlainTextToolCallMessage({
-          forceKnownCandidates: true,
-          matcher: options.matcher,
-          message: value,
-          preserveEmptyTextBlocks,
-          resolveProtectedRanges: options.resolveProtectedRanges,
-        })
+      ? forcedScrubSnapshot(value, preserveEmptyTextBlocks)
       : undefined;
     if (forced) {
       return forced;
