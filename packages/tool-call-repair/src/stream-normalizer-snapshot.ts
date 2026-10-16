@@ -440,6 +440,8 @@ export function createForcedScrubSnapshot(options: {
     ranges: readonly ScannedCallSequence[],
   ): boolean => {
     if (
+      // A trailing empty block can acquire a call independently of the preceding line.
+      candidate.parts.at(-1)?.start === candidate.text.length ||
       ranges.some((range) => range.activeStart !== undefined || range.end === candidate.text.length)
     ) {
       return false;

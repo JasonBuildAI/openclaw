@@ -7,6 +7,7 @@ import {
   doneEvent,
   errorEvent,
   matcher,
+  streamTextDelta,
   textContent,
   textDelta,
 } from "./stream-normalizer.test-support.js";
@@ -16,7 +17,8 @@ function cumulativeDeltas(...chunks: string[]) {
   let snapshot = "";
   return chunks.map((chunk) => textDelta(chunk, (snapshot += chunk)));
 }
-function normalize(events: Record<string, unknown>[]) {
+function normalize(events: Record<string, unknown>[], protectCode = true) {
+  const resolveProtectedRanges = protectCode ? findMarkdownCodeRegions : undefined;
   return collectNormalizedEvents(events, {
     matcher,
     createPromotedToolCallEvents: () => [],
@@ -25,16 +27,36 @@ function normalize(events: Record<string, unknown>[]) {
         matcher,
         message,
         preserveEmptyTextBlocks,
-        resolveProtectedRanges: findMarkdownCodeRegions,
+        resolveProtectedRanges,
       });
       return projection ? { kind: "scrubbed", ...projection } : undefined;
     },
-    resolveProtectedRanges: findMarkdownCodeRegions,
+    resolveProtectedRanges,
     protectedRangesFenceCompatible: true,
   });
 }
 
 describe("forced scrub cache invalidation", () => {
+  it("rechecks an empty trailing text block as a structural call boundary", async () => {
+    const first = "[tool:read]\n{}\nVisible.";
+    const suffix = "analysis to=read code ";
+    const snapshot = (text: string) =>
+      assistantMessage([...textContent(first, text), { type: "thinking", thinking: "" }]);
+    const message = snapshot(suffix);
+    const events = await normalize(
+      [
+        streamTextDelta(first, 0, snapshot("")),
+        { type: "thinking_delta", contentIndex: 2, delta: "thinking", partial: message },
+        errorEvent(message, message),
+      ],
+      false,
+    );
+    expect(JSON.stringify(events)).not.toContain("analysis to=read");
+    expect(events.at(-1)?.partial).toMatchObject({
+      content: [...textContent("Visible.", ""), { type: "thinking", thinking: "" }],
+    });
+  });
+
   it.each(["error", "done"] as const)(
     "scrubs a new unmarked Harmony prefix from every %s snapshot",
     async (terminal) => {
