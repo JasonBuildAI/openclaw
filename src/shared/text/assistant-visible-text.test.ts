@@ -399,6 +399,38 @@ describe("assistantTraceTextFilter streamed projection", () => {
     expect(testedCharacters).toBeLessThan(source.length * 8);
   });
 
+  it("bounds streamed prefix comparisons after a stripped trace line", () => {
+    const source = [
+      'tool call: hidden {"path":"notes.md"}',
+      ...Array.from(
+        { length: 512 },
+        (_value, index) => `Step ${index}: ordinary prose about the release.`,
+      ),
+      "Done.",
+    ].join("\n");
+    const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+    let comparedCharacters = 0;
+    const original = String.prototype.startsWith;
+    const probe = vi.spyOn(String.prototype, "startsWith").mockImplementation(function (
+      this: string,
+      search: string,
+      position?: number,
+    ) {
+      comparedCharacters += search.length;
+      return original.call(this, search, position);
+    });
+    try {
+      for (let offset = 0; offset < source.length; offset += 4) {
+        projection.append(source.slice(offset, offset + 4));
+      }
+    } finally {
+      probe.mockRestore();
+    }
+    expect(projection.text).toBe(sanitizeAssistantVisibleTextWithProfile(source, "delivery", true));
+    expect(comparedCharacters).toBeGreaterThan(0);
+    expect(comparedCharacters).toBeLessThan(source.length * 64);
+  });
+
   it.each([
     [
       "a channel trace line",
@@ -528,6 +560,49 @@ describe("assistantTraceTextFilter streamed projection", () => {
     );
     expect(projection.replace("").text).toBe("");
     expect(projection.append("tool call: hidden\nReset").text).toBe("Reset");
+  });
+});
+
+describe("streamed invisible-only probing", () => {
+  it("probes the full reply once while visible text streams", () => {
+    const source = `\n  \n\t\nReal answer begins here.\n${"Step: ordinary prose about the release.\n".repeat(256)}Done.`;
+    const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+    let fullReplyProbes = 0;
+    const probe = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (
+      this: RegExp,
+      text,
+    ) {
+      if (this.source.includes("Default_Ignorable")) {
+        fullReplyProbes++;
+      }
+      return this.exec(text) !== null;
+    });
+    try {
+      for (let offset = 0; offset < source.length; offset += 4) {
+        projection.append(source.slice(offset, offset + 4));
+      }
+    } finally {
+      probe.mockRestore();
+    }
+    expect(projection.text).toBe(sanitizeAssistantVisibleTextWithProfile(source, "delivery", true));
+    expect(fullReplyProbes).toBeLessThan(8);
+  });
+
+  it("keeps an invisible-only stream empty until visible content arrives", () => {
+    const source = "\n \t\n\nReal answer.";
+    expect(sanitizeAssistantVisibleTextWithProfile(source, "delivery", true)).toBe("Real answer.");
+    for (const size of [1, 3, 7]) {
+      const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+      let accumulated = "";
+      for (let offset = 0; offset < source.length; offset += size) {
+        accumulated += source.slice(offset, offset + size);
+        projection.append(source.slice(offset, offset + size));
+        expect(projection.text).toBe(
+          sanitizeAssistantVisibleTextWithProfile(accumulated, "delivery", true),
+        );
+      }
+      expect(projection.text).toBe("Real answer.");
+    }
   });
 });
 

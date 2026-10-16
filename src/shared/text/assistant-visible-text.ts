@@ -232,8 +232,10 @@ export type AssistantVisibleTextSanitizerProfile =
 
 const profileFilters = new Map<string, readonly TextFilter[]>();
 
+const INVISIBLE_ONLY_RE = /^[\p{White_Space}\p{Default_Ignorable_Code_Point}]*$/u;
+
 function stripInvisibleAssistantText(text: string): string {
-  return /^[\p{White_Space}\p{Default_Ignorable_Code_Point}]*$/u.test(text) ? "" : text;
+  return INVISIBLE_ONLY_RE.test(text) ? "" : text;
 }
 
 export function assistantVisibleTextFilters(
@@ -294,7 +296,24 @@ export function assistantVisibleTextFilters(
     preserve ? leadingEmptyLinesTextFilter : trimTextFilter(trim, { preserveCodeIndentation }),
     {
       transform: stripInvisibleAssistantText,
-      create: () => createConditionalTextProjector(stripInvisibleAssistantText, () => true),
+      create: () => {
+        // An appended delta can keep the text invisible-only; the full reply probe runs
+        // once per stream, never once per delta.
+        let initialized = false;
+        let invisibleOnly = true;
+        return createConditionalTextProjector(stripInvisibleAssistantText, (input) => {
+          if (!invisibleOnly) {
+            return false;
+          }
+          if (!initialized) {
+            initialized = true;
+            invisibleOnly = INVISIBLE_ONLY_RE.test(input.text);
+            return invisibleOnly;
+          }
+          invisibleOnly = INVISIBLE_ONLY_RE.test(input.delta ?? input.text);
+          return invisibleOnly;
+        });
+      },
     },
   );
   profileFilters.set(key, filters);
