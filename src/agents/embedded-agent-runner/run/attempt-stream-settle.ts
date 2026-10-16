@@ -153,10 +153,9 @@ export async function settleEmbeddedAttemptStream(input: {
 
   // Snapshot only outside compaction. Compaction rewrites history in place and
   // cannot be allowed to leave the timeout result with a half-written view.
-  const wasCompactingBefore = activeSession.isCompacting;
+  const wasCompacting = activeSession.isCompacting;
   const snapshot = activeSession.messages.slice();
-  const wasCompactingAfter = activeSession.isCompacting;
-  const preCompactionSnapshot = wasCompactingBefore || wasCompactingAfter ? null : snapshot;
+  const preCompactionSnapshot = wasCompacting ? null : snapshot;
   const preCompactionSessionId = activeSession.sessionId;
   const aggregateTimeoutMs = 60_000;
 
@@ -443,6 +442,7 @@ export async function prepareEmbeddedAttemptTransport(input: {
     resolvePreparedExtraParams({
       ...extraParamsContext,
       cfg: attempt.config,
+      transportConfig: attempt.transportConfig,
       provider: attempt.provider,
       modelId: attempt.modelId,
       providerRuntimeHandle: input.getProviderRuntimeHandle(),
@@ -451,7 +451,7 @@ export async function prepareEmbeddedAttemptTransport(input: {
     });
   const providerStreamFn = registerProviderStreamForModel({
     model: attempt.model,
-    cfg: attempt.config,
+    cfg: attempt.transportConfig ?? attempt.config,
     agentDir: input.agentDir,
     workspaceDir: input.workspaceDir,
     auth,
@@ -594,6 +594,7 @@ export async function prepareEmbeddedAttemptTransport(input: {
       resolvedTransport,
       {
         preparedExtraParams: effectiveExtraParams,
+        transportConfig: attempt.transportConfig,
         modelCallUrgency: resolveModelCallUrgency(attempt),
         auth,
         nativeWebSearchPolicyContext,

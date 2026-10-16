@@ -12,10 +12,10 @@ type TextProjector = (input: TextProjection) => TextProjection;
 // Token absence must prove identity; activated syntax stays with the canonical transform.
 type TextCheckpoint = { text: string; retainStart: number; retainedOutputStart: number };
 type CheckpointTransform = (text: string, settleBefore: number) => TextCheckpoint;
-type CheckpointProjection = { text: string; delta: string | null; identity: boolean };
 export type TextFilter = {
   transform: (text: string) => string;
   checkpoint?: CheckpointTransform;
+  boundaryWhitespaceOnly?: true;
 } & ({ activationTokens: readonly string[] } | { create: () => TextProjector });
 
 /** Preserve append provenance while a probe proves that the canonical transform is identity. */
@@ -24,40 +24,29 @@ export function createConditionalTextProjector(
   shouldTransform: (input: TextProjection) => boolean,
   checkpoint?: CheckpointTransform,
 ): TextProjector {
-  if (checkpoint) {
-    const project = createCheckpointTransform(checkpoint);
-    let previous = "";
-    let identity = true;
-    return (input) => {
-      if (input.delta === "") {
-        return identity ? input : { text: previous, delta: "" };
-      }
-      const projected = shouldTransform(input)
-        ? project(input.text, input.delta, previous)
-        : { text: input.text, delta: input.delta, identity: true };
-      const delta = input.delta === null ? null : projected.delta;
-      previous = projected.text;
-      identity = projected.identity;
-      return identity && delta === input.delta ? input : { text: previous, delta };
-    };
-  }
-  const project = transform;
+  const project = checkpoint ? createCheckpointTransform(checkpoint) : undefined;
   let previous = "";
   let identity = true;
   return (input) => {
     if (input.delta === "") {
       return identity ? input : { text: previous, delta: "" };
     }
-    const text = shouldTransform(input) ? project(input.text) : input.text;
+    const shouldProject = shouldTransform(input);
+    const checkpointResult = shouldProject
+      ? project?.(input.text, input.delta, previous)
+      : undefined;
+    const text = checkpointResult?.text ?? (shouldProject ? transform(input.text) : input.text);
     const nextIdentity = text === input.text;
     const delta =
       input.delta === null
         ? null
-        : identity && nextIdentity
-          ? input.delta
-          : text.startsWith(previous)
-            ? text.slice(previous.length)
-            : null;
+        : checkpointResult
+          ? checkpointResult.delta
+          : identity && nextIdentity
+            ? input.delta
+            : text.startsWith(previous)
+              ? text.slice(previous.length)
+              : null;
     previous = text;
     identity = nextIdentity;
     return nextIdentity && delta === input.delta ? input : { text, delta };
@@ -124,7 +113,7 @@ function findTextCheckpoint(
 
 function createCheckpointTransform(
   project: CheckpointTransform,
-): (source: string, delta: string | null, previous: string) => CheckpointProjection {
+): (source: string, delta: string | null, previous: string) => TextProjection {
   let sourceLength = 0;
   let pending = "";
   let settled = "";
@@ -179,9 +168,8 @@ function createCheckpointTransform(
       pending = text.slice(boundary.offset);
       context = boundary.context;
     }
-    const identity = visible.length === source.length && visible === source;
     previousTail = window.slice(retain);
-    return { text: visible, delta, identity };
+    return { text: visible, delta };
   };
 }
 
@@ -220,7 +208,13 @@ export function createTextProjection(filters: readonly TextFilter[]) {
   }));
   let source = "";
   let text = "";
+  let trimStart = 0;
+  let trimEnd = 0;
+  let onlyBoundaryWhitespaceChanged = true;
+  let matchesTrimmedSource: boolean | undefined;
   const project = (value: TextProjection) => {
+    onlyBoundaryWhitespaceChanged = true;
+    matchesTrimmedSource = undefined;
     let input = value;
     for (const stage of stages) {
       // Replacements can expose earlier syntax, so every downstream probe starts fresh.
@@ -228,7 +222,11 @@ export function createTextProjection(filters: readonly TextFilter[]) {
         stage.projector =
           "create" in stage.filter ? stage.filter.create() : createActivatedProjector(stage.filter);
       }
-      input = stage.projector(input);
+      const next = stage.projector(input);
+      if (!stage.filter.boundaryWhitespaceOnly && next !== input && next.text !== input.text) {
+        onlyBoundaryWhitespaceChanged = false;
+      }
+      input = next;
     }
     return input;
   };
@@ -239,7 +237,21 @@ export function createTextProjection(filters: readonly TextFilter[]) {
     get text() {
       return text;
     },
+    get matchesTrimmedSource(): boolean {
+      // Padding-only stages preserve the source span. Real transforms still need
+      // an exact comparison when their output happens to have the same length.
+      return (matchesTrimmedSource ??=
+        text.length === Math.max(0, trimEnd - trimStart) &&
+        (onlyBoundaryWhitespaceChanged || source.startsWith(text, trimStart)));
+    },
     append(delta: string, preparedSource?: string): TextProjection {
+      if (trimEnd === 0) {
+        trimStart += delta.length - delta.trimStart().length;
+      }
+      const contentLength = delta.trimEnd().length;
+      if (contentLength > 0) {
+        trimEnd = source.length + contentLength;
+      }
       // A validated cumulative snapshot already owns these bytes; rebuilding its
       // rope would copy the growing reply again when a consumer reads it.
       source = preparedSource ?? source + delta;
@@ -253,6 +265,8 @@ export function createTextProjection(filters: readonly TextFilter[]) {
     },
     replace(value: string): TextProjection {
       source = value;
+      trimStart = value.length - value.trimStart().length;
+      trimEnd = value.trimEnd().length;
       const next = project({ text: source, delta: null });
       next.delta = null;
       text = next.text;
@@ -295,6 +309,7 @@ export function trimTextFilter(
   options?: { preserveCodeIndentation?: boolean },
 ): TextFilter {
   return {
+    boundaryWhitespaceOnly: true,
     transform: (text) =>
       mode === "none"
         ? text

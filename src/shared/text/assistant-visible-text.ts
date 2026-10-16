@@ -232,10 +232,8 @@ export type AssistantVisibleTextSanitizerProfile =
 
 const profileFilters = new Map<string, readonly TextFilter[]>();
 
-const INVISIBLE_ONLY_RE = /^[\p{White_Space}\p{Default_Ignorable_Code_Point}]*$/u;
-
 function stripInvisibleAssistantText(text: string): string {
-  return INVISIBLE_ONLY_RE.test(text) ? "" : text;
+  return /^[\p{White_Space}\p{Default_Ignorable_Code_Point}]*$/u.test(text) ? "" : text;
 }
 
 export function assistantVisibleTextFilters(
@@ -297,22 +295,24 @@ export function assistantVisibleTextFilters(
     {
       transform: stripInvisibleAssistantText,
       create: () => {
-        // An appended delta can keep the text invisible-only; the full reply probe runs
-        // once per stream, never once per delta.
-        let initialized = false;
-        let invisibleOnly = true;
-        return createConditionalTextProjector(stripInvisibleAssistantText, (input) => {
-          if (!invisibleOnly) {
-            return false;
-          }
-          if (!initialized) {
-            initialized = true;
-            invisibleOnly = INVISIBLE_ONLY_RE.test(input.text);
-            return invisibleOnly;
-          }
-          invisibleOnly = INVISIBLE_ONLY_RE.test(input.delta ?? input.text);
-          return invisibleOnly;
-        });
+        let visible = false;
+        let trailingHighSurrogate = "";
+        return createConditionalTextProjector(
+          () => "",
+          (input) => {
+            if (!visible) {
+              const appended = trailingHighSurrogate + (input.delta ?? input.text);
+              // A split supplementary character cannot permanently establish visibility yet.
+              trailingHighSurrogate = /[\uD800-\uDBFF]$/.test(appended) ? appended.slice(-1) : "";
+              visible = Boolean(
+                stripInvisibleAssistantText(
+                  trailingHighSurrogate ? appended.slice(0, -1) : appended,
+                ),
+              );
+            }
+            return !visible;
+          },
+        );
       },
     },
   );
