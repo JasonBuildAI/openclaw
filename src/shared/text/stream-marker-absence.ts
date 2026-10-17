@@ -36,6 +36,14 @@ export function createStreamMarkerAbsence(options: {
       return true;
     }
     const pendingAt = reasoningSafeEnd + scan.pendingStart;
+    // Canonical scanning does not wait on an unfinished construct: it rejects it
+    // and resumes at that construct's next "<", which still finds a nested block
+    // inside a malformed tag. Absence is provable only while the unfinished
+    // construct holds no later "<" that canonical recovery could rescan.
+    if (text.includes("<", pendingAt + 1)) {
+      sticky = true;
+      return false;
+    }
     if (text.length - pendingAt > UNRESOLVED_MARKER_RUN_CAP) {
       sticky = true;
       return false;

@@ -10,7 +10,11 @@ const reasoningProbe = "<thinking>secret</thinking>visible";
 function reasoningFilterIndex(filters: readonly TextFilter[]): number {
   const matches = filters.filter((filter) => filter.transform(reasoningProbe) === "visible");
   expect(matches).toHaveLength(1);
-  return filters.indexOf(matches[0]);
+  const match = matches[0];
+  if (!match) {
+    throw new Error("expected one reasoning filter");
+  }
+  return filters.indexOf(match);
 }
 
 function withActivationReference(filters: readonly TextFilter[]): readonly TextFilter[] {
@@ -77,6 +81,14 @@ describe("assistant visible reasoning filter marker absence", () => {
     }
   });
 
+  // Canonical malformed-tag recovery scans unfinished quoted constructs with
+  // final=true, which rejects the outer tag and finds the nested private block.
+  it("keeps private reasoning hidden inside a malformed quoted tag", () => {
+    const source = '<thinking x="<internal>private reflection</internal>';
+    const projection = streamIntoProjection(assistantVisibleTextFilters("delivery", true), source);
+    expect(projection.text).not.toContain("private reflection");
+  });
+
   it.each([
     "Plain reply without markers.",
     '<div class="shell">\n  <span>rendered</span>\n</div>',
@@ -93,6 +105,8 @@ describe("assistant visible reasoning filter marker absence", () => {
     "< final>spaced open</ final>tail.",
     "trailing marker fragment <thinking",
     'trailing pending <thinking x="a',
+    '<thinking x="<internal>private reflection</internal>',
+    '<thinking x="<internal>hidden</internal>tail',
     "<<<<<>>>>>",
     "<p>row 1</p>\n<p>row 2</p>",
     "carriage\r\n<thinking>hidden</thinking>\r\nvisible\r\n",

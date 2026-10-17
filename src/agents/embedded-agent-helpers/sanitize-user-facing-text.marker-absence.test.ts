@@ -17,7 +17,11 @@ const finalTagProbe = "<final>a</final>b";
 function finalTagFilterIndex(filters: readonly TextFilter[]): number {
   const matches = filters.filter((filter) => filter.transform(finalTagProbe) === "ab");
   expect(matches).toHaveLength(1);
-  return filters.indexOf(matches[0]);
+  const match = matches[0];
+  if (!match) {
+    throw new Error("expected one final-tag filter");
+  }
+  return filters.indexOf(match);
 }
 
 function withActivationReference(filters: readonly TextFilter[]): readonly TextFilter[] {
