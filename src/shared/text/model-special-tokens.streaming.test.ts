@@ -28,6 +28,9 @@ const sources: Array<[string, string]> = [
   ["tokens inside a fence", "```text\n<|assistant|>\n```\nVisible text."],
   ["token inside inline code", "`<|assistant|>` stays visible."],
   ["token inside inline code with trailing text", "Use `<|assistant|> tokens` carefully."],
+  ["escaped backtick before an inline token", "Use \\` and `<|assistant|> tokens` here."],
+  ["closer run revokes an inline span", "`<|assistant|>``"],
+  ["longer closer run revokes an inline span", "`<|assistant|>```"],
   ["token body containing an angle bracket", "head <|a<b|> tail"],
   ["prose pipe operators", "Elm: use <| for application.\n\nLater: chain with |> instead."],
   ["token beside astral letters", "𐐀<|assistant|>𐐁"],
@@ -90,6 +93,34 @@ describe("model special token streaming", () => {
       }
       expect(projection.text, `delivery profile at ${chunkSize} chars`).toBe(batch);
     }
+  });
+
+  it("scans a bounded prefix after a leaked token and a lone backtick", () => {
+    const answer = Array.from(
+      { length: 400 },
+      (_value, index) => `Step ${index}: ordinary prose about the release.`,
+    ).join("\n");
+    const source = `<|assistant|>${answer.slice(0, 8_000)} a lone \` tick ${answer.slice(8_000)}`;
+    expect(source.length).toBeGreaterThan(16_000);
+    const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+    const probe = vi.spyOn(RegExp.prototype, "test");
+    let tokenScanCharacters = 0;
+    try {
+      for (let offset = 0; offset < source.length; offset += 4) {
+        projection.append(source.slice(offset, offset + 4));
+      }
+      probe.mock.calls.forEach(([value], index) => {
+        const regex = probe.mock.instances[index] as RegExp | undefined;
+        if (regex?.source.startsWith("<[|｜]")) {
+          tokenScanCharacters += value.length;
+        }
+      });
+    } finally {
+      probe.mockRestore();
+    }
+    expect(projection.text).toBe(source.slice("<|assistant|>".length));
+    // Only the token and the backtick delta may re-run the canonical token scan.
+    expect(tokenScanCharacters).toBeLessThan(source.length * 4);
   });
 
   it("scans a bounded prefix after a leaked token", () => {
