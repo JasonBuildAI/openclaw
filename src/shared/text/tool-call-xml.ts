@@ -309,6 +309,15 @@ type ToolCallXmlOutcome = {
   appendSafe: boolean;
 };
 
+/**
+ * Appended text may only reuse a settled result when it cannot change the parse
+ * decisions at all: `<` can start a tag, and a backtick or tilde run can still
+ * close an inline code span or fence around markup that is already in the text.
+ */
+function cannotChangeXmlDecisions(appended: string): boolean {
+  return !appended.includes("<") && !appended.includes("`") && !appended.includes("~");
+}
+
 function stripToolCallXmlTagsInternal(
   text: string,
   options: StripToolCallXmlOptions,
@@ -512,7 +521,7 @@ export function toolCallXmlTextFilter(
             parsedAppendSafe &&
             appended !== null &&
             appended !== undefined &&
-            !appended.includes("<")
+            cannotChangeXmlDecisions(appended)
           ) {
             parsedOutput += appended;
             return parsedOutput;
