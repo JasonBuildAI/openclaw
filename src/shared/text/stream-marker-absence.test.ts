@@ -31,6 +31,24 @@ function assertProvenAbsenceMatchesCanonical(source: string, chunkSize: number) 
 
 const chunkSizes = [1, 2, 3, 5, 7];
 
+// Counts the characters the final-marker probe's delimiter searches touch. The
+// probe only uses string methods that work on a boxed primitive, so the wrapper
+// stays a runtime string that carries its own `indexOf`.
+function countedDelimiters(input: string, scan: { chars: number }): string {
+  const boxed = Object(input) as unknown as string;
+  Object.defineProperty(boxed, "indexOf", {
+    value(search: string, position?: number): number {
+      const found = input.indexOf(search, position);
+      if (search === "<" || search === ">") {
+        const from = position ?? 0;
+        scan.chars += found === -1 ? input.length - from : found - from + 1;
+      }
+      return found;
+    },
+  });
+  return boxed;
+}
+
 describe("stream marker absence probe", () => {
   it.each([
     "Plain reply without markers.",
@@ -116,6 +134,21 @@ describe("stream marker absence probe", () => {
     for (let offset = 0; offset < source.length; offset += 3) {
       expect(probe(source.slice(0, offset + 3))).toBe(true);
     }
+  });
+
+  it("finds final-tag delimiters once per span in a large comparison-only reply", () => {
+    const lead = "lead line\n";
+    const source = `${lead}${"x < 5 and y < 6 stay literal.\n".repeat(1024)}`;
+    const appended = `${source}tail < 7\n`;
+    const scan = { chars: 0 };
+    const appendProbe = createStreamMarkerAbsence({ finalTags: true, reasoningTags: true });
+    expect(appendProbe(countedDelimiters(lead, scan))).toBe(true);
+    expect(appendProbe(countedDelimiters(appended, scan))).toBe(true);
+    const replaceProbe = createStreamMarkerAbsence({ finalTags: true, reasoningTags: true });
+    expect(replaceProbe(countedDelimiters(source, scan))).toBe(true);
+    // A per-"<" suffix rescan would touch tens of millions of characters here; one
+    // monotonic pass over 1,024 comparisons stays proportional to the input.
+    expect(scan.chars).toBeLessThan(appended.length * 8);
   });
 
   it("never reports absence once the canonical transforms would change the text (fuzz)", () => {

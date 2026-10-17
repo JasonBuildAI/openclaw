@@ -89,6 +89,24 @@ describe("assistant visible reasoning filter marker absence", () => {
     expect(projection.text).not.toContain("private reflection");
   });
 
+  it("keeps a large comparison-only replacement off the canonical transform", () => {
+    const source = "x < 5 and y < 6 stay literal.\n".repeat(2048);
+    const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+    projection.append("x < 5");
+    const strip = vi.spyOn(reasoningTags, "stripReasoningTagsFromText");
+    try {
+      const started = performance.now();
+      const replaced = projection.replace(source);
+      expect(replaced.text).toBe(source.trimEnd());
+      expect(strip).not.toHaveBeenCalled();
+      // The replacement path rebuilds the probe; a per-"<" suffix rescan would
+      // take seconds on this input, a single span pass takes milliseconds.
+      expect(performance.now() - started).toBeLessThan(1_000);
+    } finally {
+      strip.mockRestore();
+    }
+  });
+
   it.each([
     "Plain reply without markers.",
     '<div class="shell">\n  <span>rendered</span>\n</div>',

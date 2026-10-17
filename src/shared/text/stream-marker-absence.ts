@@ -54,14 +54,20 @@ export function createStreamMarkerAbsence(options: {
 
   const advanceFinal = (text: string): boolean => {
     let cursor = finalSafeEnd;
+    // No ">" lies between a candidate and the next ">", so every later "<" that
+    // still precedes it shares that delimiter. Reusing it keeps a comparison-only
+    // reply linear instead of rescanning the suffix per "<". -1 means none follows.
+    let terminator = -2;
     while (cursor < text.length) {
       const lt = text.indexOf("<", cursor);
       if (lt === -1) {
         finalSafeEnd = text.length;
         return true;
       }
-      const gt = text.indexOf(">", lt);
-      if (gt === -1) {
+      if (terminator !== -1 && terminator < lt) {
+        terminator = text.indexOf(">", lt);
+      }
+      if (terminator === -1) {
         if (openFinalTagDead(text, lt)) {
           cursor = lt + 1;
           continue;
@@ -74,16 +80,16 @@ export function createStreamMarkerAbsence(options: {
         return true;
       }
       const nextLt = text.indexOf("<", lt + 1);
-      if (nextLt !== -1 && nextLt < gt) {
+      if (nextLt !== -1 && nextLt < terminator) {
         // The candidate run is cut by another "<": no final tag can start here.
         cursor = lt + 1;
         continue;
       }
-      if (findFinalTagMatches(text.slice(lt, gt + 1)).length > 0) {
+      if (findFinalTagMatches(text.slice(lt, terminator + 1)).length > 0) {
         sticky = true;
         return false;
       }
-      cursor = gt + 1;
+      cursor = terminator + 1;
     }
     finalSafeEnd = text.length;
     return true;
