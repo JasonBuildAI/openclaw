@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { assistantVisibleTextFilters } from "./assistant-visible-text.js";
+import {
+  assistantVisibleTextFilters,
+  sanitizeAssistantVisibleTextWithProfile,
+} from "./assistant-visible-text.js";
 import { modelSpecialTokensTextFilter, stripModelSpecialTokens } from "./model-special-tokens.js";
 import { createTextProjection } from "./text-projection.js";
 
@@ -24,6 +27,8 @@ const sources: Array<[string, string]> = [
   ["full-width DeepSeek token", "<｜begin▁of▁sentence｜>Hello there"],
   ["tokens inside a fence", "```text\n<|assistant|>\n```\nVisible text."],
   ["token inside inline code", "`<|assistant|>` stays visible."],
+  ["token inside inline code with trailing text", "Use `<|assistant|> tokens` carefully."],
+  ["token body containing an angle bracket", "head <|a<b|> tail"],
   ["prose pipe operators", "Elm: use <| for application.\n\nLater: chain with |> instead."],
   ["token beside astral letters", "𐐀<|assistant|>𐐁"],
   ["token beside a combining mark", "cafe\u0301<|assistant|>word"],
@@ -63,6 +68,30 @@ describe("model special token streaming", () => {
     expect(projection.append(" there").text).toBe("Hello there");
   });
 
+  it("matches the batch transform at every prefix", () => {
+    for (const [_name, source] of sources) {
+      const projection = createTextProjection([modelSpecialTokensTextFilter]);
+      for (let end = 1; end <= source.length; end++) {
+        projection.append(source.slice(end - 1, end));
+        expect(projection.text, `prefix ${end} of ${JSON.stringify(source)}`).toBe(
+          stripModelSpecialTokens(source.slice(0, end)),
+        );
+      }
+    }
+  });
+
+  it("matches the batch delivery profile when a token becomes code-owned later", () => {
+    const source = "Use `<|assistant|> tokens` carefully.";
+    const batch = sanitizeAssistantVisibleTextWithProfile(source, "delivery", false);
+    for (const chunkSize of chunkSizes) {
+      const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+      for (let offset = 0; offset < source.length; offset += chunkSize) {
+        projection.append(source.slice(offset, offset + chunkSize));
+      }
+      expect(projection.text, `delivery profile at ${chunkSize} chars`).toBe(batch);
+    }
+  });
+
   it("scans a bounded prefix after a leaked token", () => {
     const answer = Array.from(
       { length: 400 },
@@ -80,7 +109,7 @@ describe("model special token streaming", () => {
       probe.mock.calls.forEach(([value], index) => {
         const regex = probe.mock.instances[index] as RegExp | undefined;
         if (regex?.source.startsWith("<[|｜]")) {
-          tokenScanCharacters += String(value).length;
+          tokenScanCharacters += value.length;
         }
       });
     } finally {

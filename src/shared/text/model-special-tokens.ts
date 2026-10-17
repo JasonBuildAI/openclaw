@@ -1,4 +1,9 @@
 // Model special token helpers strip model control tokens outside code regions.
+import {
+  buildCodeSpanIndex,
+  type InlineCodeState,
+} from "../../../packages/markdown-core/src/code-spans.js";
+import type { FenceScanState } from "../../../packages/markdown-core/src/fences.js";
 import { findCodeRegions } from "./code-regions.js";
 import type { TextFilter, TextProjection } from "./text-projection.js";
 
@@ -7,20 +12,48 @@ import type { TextFilter, TextProjection } from "./text-projection.js";
 const MODEL_SPECIAL_TOKEN_RE = /<[|｜][^|｜\s]*[|｜]>/g;
 // A delta can split the two-character opener, so activation carries one trailing character.
 const TOKEN_START_RE = /<[|｜]/;
-// A trailing `<`, `<|body`, or `<|body|` can still become a token when the stream continues.
-const TOKEN_PREFIX_SUFFIX_RE = /^<(?:[|｜][^|｜\s]*[|｜]?)?$/u;
 
+function findLastPipe(text: string, fromIndex: number): number {
+  return Math.max(text.lastIndexOf("|", fromIndex), text.lastIndexOf("｜", fromIndex));
+}
+
+// A trailing `<`, `<|body`, or `<|body|` can still become a token when the stream continues.
+// The body may itself contain `<`, so the opener is found from its pipes, not the last `<`.
 function endsWithIncompleteTokenPrefix(text: string): boolean {
-  const start = text.lastIndexOf("<");
-  return start >= 0 && TOKEN_PREFIX_SUFFIX_RE.test(text.slice(start));
+  if (text.endsWith("<")) {
+    return true;
+  }
+  const closePipe = findLastPipe(text, text.length - 1);
+  if (closePipe < 1) {
+    return false;
+  }
+  if (closePipe === text.length - 1) {
+    const openPipe = findLastPipe(text, closePipe - 1);
+    if (openPipe > 0 && text[openPipe - 1] === "<") {
+      return true;
+    }
+    return text[closePipe - 1] === "<";
+  }
+  if (text[closePipe - 1] !== "<") {
+    return false;
+  }
+  return !/[\s|｜]/.test(text.slice(closePipe + 1));
 }
 
 function endsWithCompleteToken(text: string): boolean {
-  if (!/[|｜]>$/.test(text.slice(-2))) {
+  if (!text.endsWith(">")) {
     return false;
   }
-  const start = text.lastIndexOf("<");
-  return start >= 0 && /^<[|｜][^|｜\s]*[|｜]>$/u.test(text.slice(start));
+  const closePipe = findLastPipe(text, text.length - 2);
+  if (closePipe < 1) {
+    return false;
+  }
+  const openPipe = findLastPipe(text, closePipe - 1);
+  return (
+    openPipe > 0 &&
+    text[openPipe - 1] === "<" &&
+    !/[\s|｜]/.test(text.slice(openPipe + 1, closePipe))
+  );
 }
 
 // A token followed by half of a surrogate pair still has an undecided separator.
@@ -82,6 +115,10 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
   let pendingPrefix = false;
   // A removed token at the end decides its separator only once the next character is complete.
   let separatorPending = false;
+  // An unterminated inline span can make earlier text code-owned when it later closes.
+  let inlineCode: InlineCodeState | undefined;
+  let fenceState: FenceScanState | undefined;
+  let inlineOpen = false;
 
   const projectFull = (text: string, delta: string | null): TextProjection => {
     inputLength = text.length;
@@ -96,6 +133,10 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
       endsWithCompleteToken(text) ||
       endsWithTokenBeforeIncompleteSurrogate(text) ||
       (separatorPending && /[\uD800-\uDBFF]$/u.test(text));
+    const codeSpans = buildCodeSpanIndex(text);
+    inlineCode = codeSpans.inlineState;
+    fenceState = codeSpans.fenceState;
+    inlineOpen = inlineCode.open;
     return { text: next, delta: nextDelta };
   };
 
@@ -120,12 +161,16 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
       // The opener can start in retained text, so the canonical transform owns this delta.
       return projectFull(input.text, appended);
     }
-    if (pendingPrefix || separatorPending || TOKEN_START_RE.test(appended)) {
+    if (inlineOpen || pendingPrefix || separatorPending || TOKEN_START_RE.test(appended)) {
       return projectFull(input.text, appended);
     }
     inputLength = input.text.length;
     output += appended;
     pendingPrefix = appended.endsWith("<");
+    const codeSpans = buildCodeSpanIndex(appended, inlineCode, fenceState);
+    inlineCode = codeSpans.inlineState;
+    fenceState = codeSpans.fenceState;
+    inlineOpen = inlineCode.open;
     return { text: output, delta: appended };
   };
 }
