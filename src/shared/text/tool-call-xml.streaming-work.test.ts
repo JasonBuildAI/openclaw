@@ -41,7 +41,9 @@ function measure(filters: readonly TextFilter[], source: string) {
 
 it("bounds sanitizer work after an unfenced tool-call quote", () => {
   const source = `Here is the call I made:\n${quotedCall}${prose(40_000)}\n`;
-  const filters = [toolCallXmlTextFilter({ stripFunctionResponseAfterPluralToolCalls: true }, true)];
+  const filters = [
+    toolCallXmlTextFilter({ stripFunctionResponseAfterPluralToolCalls: true }, true),
+  ];
   const result = measure(filters, source);
   console.log(
     `source=${source.length} testedCharacters=${result.testedCharacters} ratio=${(result.testedCharacters / source.length).toFixed(1)}`,
@@ -53,7 +55,9 @@ it("bounds sanitizer work after an unfenced tool-call quote", () => {
 
 it("keeps quoted tool-call markup out of the delivered text", () => {
   const source = `Here is the call I made:\n${quotedCall}Visible answer.\n`;
-  const filters = [toolCallXmlTextFilter({ stripFunctionResponseAfterPluralToolCalls: true }, true)];
+  const filters = [
+    toolCallXmlTextFilter({ stripFunctionResponseAfterPluralToolCalls: true }, true),
+  ];
   const result = measure(filters, source);
   expect(result.delivered).toBe(applyTextFilters(source, filters));
   expect(result.delivered).not.toContain("function_calls");
