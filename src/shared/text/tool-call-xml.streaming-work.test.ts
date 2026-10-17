@@ -79,4 +79,17 @@ describe("toolCallXmlTextFilter streamed projection work", () => {
     }
     expect(projection.text).toBe(source);
   });
+
+  it("still strips a tool call that follows ordinary markup", () => {
+    const call = '<tool_call>{"path":"a.ts"}</tool_call>';
+    const source = `${jsxAnswer(2)}\n${call}\nAfter.`;
+    const projection = createTextProjection([
+      toolCallXmlTextFilter({ stripFunctionResponseAfterPluralToolCalls: true }, true),
+    ]);
+    for (let offset = 0; offset < source.length; offset += CHUNK) {
+      projection.append(source.slice(offset, offset + CHUNK));
+    }
+    expect(projection.text).toBe(stripToolCallXmlTags(source));
+    expect(projection.text).not.toContain('{"path":"a.ts"}');
+  });
 });
