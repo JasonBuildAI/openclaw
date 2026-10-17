@@ -26,6 +26,7 @@ const sources: Array<[string, string]> = [
   ["token at the end before a word", "Hello<|assistant|>World"],
   ["full-width DeepSeek token", "<｜begin▁of▁sentence｜>Hello there"],
   ["tokens inside a fence", "```text\n<|assistant|>\n```\nVisible text."],
+  ["token inside a tilde fence", "~~~text\n<|assistant|>\n~~~\nVisible text."],
   ["token inside inline code", "`<|assistant|>` stays visible."],
   ["token inside inline code with trailing text", "Use `<|assistant|> tokens` carefully."],
   ["escaped backtick before an inline token", "Use \\` and `<|assistant|> tokens` here."],
@@ -93,6 +94,30 @@ describe("model special token streaming", () => {
       }
       expect(projection.text, `delivery profile at ${chunkSize} chars`).toBe(batch);
     }
+  });
+
+  it("scans a bounded prefix with tilde-dense prose", () => {
+    const source = `<|assistant|>${"Latency is about ~12 ms at ~50% load. ".repeat(500).trimEnd()}`;
+    expect(source.length).toBeGreaterThan(16_000);
+    const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+    const probe = vi.spyOn(RegExp.prototype, "test");
+    let tokenScanCharacters = 0;
+    try {
+      for (let offset = 0; offset < source.length; offset += 4) {
+        projection.append(source.slice(offset, offset + 4));
+      }
+      probe.mock.calls.forEach(([value], index) => {
+        const regex = probe.mock.instances[index] as RegExp | undefined;
+        if (regex?.source.startsWith("<[|｜]")) {
+          tokenScanCharacters += value.length;
+        }
+      });
+    } finally {
+      probe.mockRestore();
+    }
+    expect(projection.text).toBe(source.slice("<|assistant|>".length));
+    // A single "~" cannot change code ownership, so only the token delta may re-scan.
+    expect(tokenScanCharacters).toBeLessThan(source.length * 4);
   });
 
   it("scans a bounded prefix after a leaked token and a lone backtick", () => {

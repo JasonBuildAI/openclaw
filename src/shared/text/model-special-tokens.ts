@@ -100,8 +100,8 @@ export function stripModelSpecialTokens(text: string): string {
 /**
  * Streams the same stripping without re-parsing the settled prefix after a leak. Once a
  * token has appeared, deltas that cannot start or complete one append directly; the
- * canonical transform only runs for an unstable tail, a token-ending separator, or a
- * backtick/tilde delta that can change whether an earlier token is code-owned.
+ * canonical transform only runs for an unstable tail, a token-ending separator, a backtick
+ * delta, or a fence-capable tilde run that can change whether an earlier token is code-owned.
  */
 export function createModelSpecialTokenProjector(): (input: TextProjection) => TextProjection {
   let inputLength = 0;
@@ -111,6 +111,8 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
   let pendingPrefix = false;
   // A removed token at the end decides its separator only once the next character is complete.
   let separatorPending = false;
+  // Only a 3+ tilde run can open or close a fence, so a split run carries two characters.
+  let tildeCarry = "";
 
   const projectFull = (text: string, delta: string | null): TextProjection => {
     inputLength = text.length;
@@ -125,6 +127,7 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
       endsWithCompleteToken(text) ||
       endsWithTokenBeforeIncompleteSurrogate(text) ||
       (separatorPending && /[\uD800-\uDBFF]$/u.test(text));
+    tildeCarry = text.slice(-2);
     return { text: next, delta: nextDelta };
   };
 
@@ -149,17 +152,20 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
       // The opener can start in retained text, so the canonical transform owns this delta.
       return projectFull(input.text, appended);
     }
+    const changesCodeOwnership =
+      appended.includes("`") || appended.includes("~~~") || (tildeCarry + appended).includes("~~~");
     if (
       pendingPrefix ||
       separatorPending ||
       TOKEN_START_RE.test(appended) ||
-      /[`~]/.test(appended)
+      changesCodeOwnership
     ) {
       return projectFull(input.text, appended);
     }
     inputLength = input.text.length;
     output += appended;
     pendingPrefix = appended.endsWith("<");
+    tildeCarry = input.text.slice(-2);
     return { text: output, delta: appended };
   };
 }
