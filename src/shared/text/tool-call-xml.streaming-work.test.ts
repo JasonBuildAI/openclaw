@@ -92,4 +92,22 @@ describe("toolCallXmlTextFilter streamed projection work", () => {
     expect(projection.text).toBe(stripToolCallXmlTags(source));
     expect(projection.text).not.toContain('{"path":"a.ts"}');
   });
+
+  it("still strips a tool call behind a malformed backtick fence", () => {
+    const call = '<tool_call>{"path":"a.ts"}</tool_call>';
+    // CommonMark forbids backticks in a backtick fence's info string, so this line
+    // does not own a code block for the canonical resolver.
+    const source = `\`\`\`jsx \`code\`\n${call}\nDone.`;
+    const projection = createTextProjection([
+      toolCallXmlTextFilter({ stripFunctionResponseAfterPluralToolCalls: true }, true),
+    ]);
+    const deltas: string[] = [];
+    for (let offset = 0; offset < source.length; offset += CHUNK) {
+      const result = projection.append(source.slice(offset, offset + CHUNK));
+      deltas.push(result.delta ?? "");
+    }
+    expect(projection.text).not.toContain(call);
+    expect(projection.text).not.toContain('{"path":"a.ts"}');
+    expect(deltas.join("")).not.toContain('{"path":"a.ts"}');
+  });
 });

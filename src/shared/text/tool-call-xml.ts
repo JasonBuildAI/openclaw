@@ -457,7 +457,16 @@ export function toolCallXmlTextFilter(
       const isInsideSettledFence = (text: string, pos: number) => {
         fenceSpans ??= scanFenceSpans(text).spans;
         const span = findFenceSpanAt(fenceSpans, pos);
-        return Boolean(span && /[\r\n]/.test(text.slice(span.start, pos)));
+        if (!span) {
+          return false;
+        }
+        // CommonMark forbids backticks in a backtick fence's info string, so such a
+        // line is not code for the canonical resolver and must not short-circuit here.
+        const info = span.openLine.slice(span.indent.length + span.marker.length);
+        if (span.marker.startsWith("`") && info.includes("`")) {
+          return false;
+        }
+        return /[\r\n]/.test(text.slice(span.start, pos));
       };
       return createConditionalTextProjector(
         (text) => {
@@ -480,6 +489,7 @@ export function toolCallXmlTextFilter(
             return false;
           }
           fenceSpans = undefined;
+          let deferredStart: number | undefined;
           for (let start = text.indexOf("<", scannedThrough); start !== -1;) {
             const next = text.indexOf("<", start + 1);
             const candidate = text.slice(start, next === -1 ? text.length : next);
@@ -492,6 +502,9 @@ export function toolCallXmlTextFilter(
               // candidate that cannot be a recognized tag start uses the fence proof,
               // where container or HTML-block ownership falls back to that resolver.
               if (prefixCandidate && !quickCandidate && isInsideSettledFence(text, start)) {
+                // Keep the partial candidate in the unscanned tail so a later delta
+                // that completes it still reaches the canonical resolver.
+                deferredStart ??= start;
                 start = next;
                 continue;
               }
@@ -508,7 +521,7 @@ export function toolCallXmlTextFilter(
             }
             start = next;
           }
-          scannedThrough = text.length;
+          scannedThrough = deferredStart ?? text.length;
           codeRegions = undefined;
           return false;
         },
