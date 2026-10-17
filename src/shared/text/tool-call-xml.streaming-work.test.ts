@@ -116,6 +116,10 @@ const documents: string[] = [
   '<function_response id="1" {"a":1}\nprose\n',
   '<function_calls> name="read_file" name="other" {"path":"a.md"}\nprose\n',
   '<invoke name="read_file"\n{"path":"a.md"}\nprose\n',
+  // A later backtick or tilde can close a code span or fence around markup that is
+  // already in the reply, so an append carrying one must not reuse a settled parse.
+  '`<function_calls> name="read_file" {"path":"a.md"}``\n',
+  "See ``</function_calls>`` here\n",
 ];
 
 const configurations: Array<{ name: string; filters: readonly TextFilter[] }> = [
