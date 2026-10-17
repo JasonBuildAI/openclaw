@@ -1,9 +1,32 @@
 // Model special token helpers strip model control tokens outside code regions.
 import { findCodeRegions } from "./code-regions.js";
+import type { TextFilter, TextProjection } from "./text-projection.js";
 
 // Match both ASCII pipe <|...|> and full-width pipe <｜...｜> (U+FF5C) variants.
 // Control tokens never contain whitespace; prose operators like `<|` ... `|>` do.
 const MODEL_SPECIAL_TOKEN_RE = /<[|｜][^|｜\s]*[|｜]>/g;
+// A delta can split the two-character opener, so activation carries one trailing character.
+const TOKEN_START_RE = /<[|｜]/;
+// A trailing `<`, `<|body`, or `<|body|` can still become a token when the stream continues.
+const TOKEN_PREFIX_SUFFIX_RE = /^<(?:[|｜][^|｜\s]*[|｜]?)?$/u;
+
+function endsWithIncompleteTokenPrefix(text: string): boolean {
+  const start = text.lastIndexOf("<");
+  return start >= 0 && TOKEN_PREFIX_SUFFIX_RE.test(text.slice(start));
+}
+
+function endsWithCompleteToken(text: string): boolean {
+  if (!/[|｜]>$/.test(text.slice(-2))) {
+    return false;
+  }
+  const start = text.lastIndexOf("<");
+  return start >= 0 && /^<[|｜][^|｜\s]*[|｜]>$/u.test(text.slice(start));
+}
+
+// A token followed by half of a surrogate pair still has an undecided separator.
+function endsWithTokenBeforeIncompleteSurrogate(text: string): boolean {
+  return /[\uD800-\uDBFF]$/u.test(text) && endsWithCompleteToken(text.slice(0, -1));
+}
 
 /**
  * Strips leaked model control tokens like `<|assistant|>` or full-width pipe variants.
@@ -45,3 +68,70 @@ export function stripModelSpecialTokens(text: string): string {
   out += text.slice(cursor);
   return out;
 }
+
+/**
+ * Streams the same stripping without re-parsing the settled prefix after a leak. Once a
+ * token has appeared, deltas that cannot start or complete one append directly; the
+ * canonical transform only runs for an unstable tail or a token-ending separator.
+ */
+export function createModelSpecialTokenProjector(): (input: TextProjection) => TextProjection {
+  let inputLength = 0;
+  let output = "";
+  let active = false;
+  let activationTail = "";
+  let pendingPrefix = false;
+  // A removed token at the end decides its separator only once the next character is complete.
+  let separatorPending = false;
+
+  const projectFull = (text: string, delta: string | null): TextProjection => {
+    inputLength = text.length;
+    const next = stripModelSpecialTokens(text);
+    const nextDelta =
+      delta === null ? null : next.startsWith(output) ? next.slice(output.length) : null;
+    output = next;
+    active ||= TOKEN_START_RE.test(text);
+    activationTail = text.slice(-1);
+    pendingPrefix = endsWithIncompleteTokenPrefix(text);
+    separatorPending =
+      endsWithCompleteToken(text) ||
+      endsWithTokenBeforeIncompleteSurrogate(text) ||
+      (separatorPending && /[\uD800-\uDBFF]$/u.test(text));
+    return { text: next, delta: nextDelta };
+  };
+
+  return (input) => {
+    if (input.delta === null) {
+      return projectFull(input.text, null);
+    }
+    const appended = input.delta;
+    if (input.text.length !== inputLength + appended.length) {
+      // A prepared snapshot replaced the source instead of extending it.
+      return projectFull(input.text, appended);
+    }
+    if (!active) {
+      const windowText = activationTail + appended;
+      active = TOKEN_START_RE.test(windowText);
+      activationTail = windowText.slice(-1);
+      if (!active) {
+        inputLength = input.text.length;
+        output = input.text;
+        return input;
+      }
+      // The opener can start in retained text, so the canonical transform owns this delta.
+      return projectFull(input.text, appended);
+    }
+    if (pendingPrefix || separatorPending || TOKEN_START_RE.test(appended)) {
+      return projectFull(input.text, appended);
+    }
+    inputLength = input.text.length;
+    output += appended;
+    pendingPrefix = appended.endsWith("<");
+    return { text: output, delta: appended };
+  };
+}
+
+/** Delivery filter: batch parity through `transform`, bounded work through `create`. */
+export const modelSpecialTokensTextFilter: TextFilter = {
+  transform: stripModelSpecialTokens,
+  create: createModelSpecialTokenProjector,
+};
