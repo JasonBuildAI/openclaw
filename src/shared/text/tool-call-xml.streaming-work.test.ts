@@ -120,6 +120,30 @@ const documents: string[] = [
   // already in the reply, so an append carrying one must not reuse a settled parse.
   '`<function_calls> name="read_file" {"path":"a.md"}``\n',
   "See ``</function_calls>`` here\n",
+  // The two review findings, as their exact documents.
+  "Use `<parameter/>x`.",
+  '<tool_call> name="exec" {"command":"ls"}',
+];
+
+// Both findings arrived as a two-append sequence, and each append is one cache
+// decision, so assert the transition itself instead of only uniform splits of the
+// finished document. `leaked` lists what must never reach the user for that shape.
+const twoAppendTransitions: Array<{ name: string; deltas: string[]; leaked: string[] }> = [
+  {
+    name: "a closing backtick grants code ownership to an earlier tag",
+    deltas: ["Use `<parameter/>x", "`."],
+    leaked: [],
+  },
+  {
+    name: "a partial attribute run acquires a JSON payload",
+    deltas: ["<tool_call> name=", '"exec" {"command":"ls"}'],
+    leaked: ["tool_call", "exec"],
+  },
+  {
+    name: "a partial attribute run acquires a bracket payload",
+    deltas: ['<function_calls> name="read_file" ', '[{"path":"a.md"}]'],
+    leaked: ["function_calls", "read_file"],
+  },
 ];
 
 const configurations: Array<{ name: string; filters: readonly TextFilter[] }> = [
@@ -158,4 +182,22 @@ it("streams the same text as the canonical sanitizer for tool-call markup", () =
     }
   }
   expect(mismatches).toEqual([]);
+});
+
+it.each(twoAppendTransitions)("keeps $name on the canonical path", ({ deltas, leaked }) => {
+  const document = deltas.join("");
+  for (const configuration of configurations) {
+    const canonical = applyTextFilters(document, configuration.filters);
+    const stream = createTextProjection(configuration.filters);
+    let delivered = "";
+    for (const delta of deltas) {
+      const result = stream.append(delta);
+      delivered = result.delta === null ? result.text : delivered + result.delta;
+    }
+    expect(stream.text, configuration.name).toBe(canonical);
+    expect(delivered, configuration.name).toBe(canonical);
+    for (const marker of leaked) {
+      expect(delivered, configuration.name).not.toContain(marker);
+    }
+  }
 });
