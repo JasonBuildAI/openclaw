@@ -106,6 +106,16 @@ const documents: string[] = [
   'text <function_calls> then <parameter name="a">b</parameter> then more text\n',
   `${quotedCall}answer text follows the call\n`,
   `${quotedCall}${quotedCall}twice\n`,
+  // An attribute run after a preserved tag can still acquire a JSON payload, so
+  // these must keep falling back to the canonical parse at every delta split.
+  '<function_calls> name="read_file" {"path":"docs/readme.md"}\nvisible answer\n',
+  '<function_calls> name="read_file" \n{"path":"docs/readme.md"}\nvisible answer\n',
+  '<invoke name="read_file" {"path":"a.md"}\nprose\n',
+  '<tool_call> name=a [{"x":1}]\nprose\n',
+  '<parameter name= {"a":1}\nprose\n',
+  '<function_response id="1" {"a":1}\nprose\n',
+  '<function_calls> name="read_file" name="other" {"path":"a.md"}\nprose\n',
+  '<invoke name="read_file"\n{"path":"a.md"}\nprose\n',
 ];
 
 const configurations: Array<{ name: string; filters: readonly TextFilter[] }> = [

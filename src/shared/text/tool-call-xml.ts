@@ -280,10 +280,19 @@ export function stripToolCallXmlTags(input: string, options: StripToolCallXmlOpt
   return stripToolCallXmlTagsInternal(input, options, false);
 }
 
+// `TOOL_CALL_JSON_PAYLOAD_START_RE` can still match an already-preserved tag once a
+// later append completes an attribute run and supplies `{` or `[`, so every
+// attribute-run prefix stays unsettled. The trailing group allows exactly one partial
+// run (name only, `=`, or an unfinished value); the value classes are deliberately
+// looser than the canonical regex so the check fails safe. Covers whitespace-only tails.
+const ATTRIBUTE_TAIL_PREFIX_RE =
+  /^(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>]+))*(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*\s*(?:=\s*(?:"[^"]*|'[^']*|[^\s"'=<>]*)?)?)?\s*$/;
+
 /**
  * Whether appending text that contains no `<` can still change this parser's
- * decisions. A tag head without its closer can still become a tool-call tag, and
- * a tag followed only by whitespace can still acquire a payload or a line end.
+ * decisions. A tag head without its closer can still become a tool-call tag, and a
+ * tag that is being followed by an attribute run can still acquire a payload or a
+ * line end once the run is completed.
  */
 function hasUnsettledXmlTail(text: string): boolean {
   const lastOpen = text.lastIndexOf("<");
@@ -291,7 +300,7 @@ function hasUnsettledXmlTail(text: string): boolean {
   if (lastOpen > lastClose) {
     return true;
   }
-  return /^\s*$/.test(text.slice(lastClose + 1));
+  return ATTRIBUTE_TAIL_PREFIX_RE.test(text.slice(lastClose + 1));
 }
 
 type ToolCallXmlOutcome = {
