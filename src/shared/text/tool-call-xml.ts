@@ -280,23 +280,52 @@ export function stripToolCallXmlTags(input: string, options: StripToolCallXmlOpt
   return stripToolCallXmlTagsInternal(input, options, false);
 }
 
+/**
+ * Whether appending text that contains no `<` can still change this parser's
+ * decisions. A tag head without its closer can still become a tool-call tag, and
+ * a tag followed only by whitespace can still acquire a payload or a line end.
+ */
+function hasUnsettledXmlTail(text: string): boolean {
+  const lastOpen = text.lastIndexOf("<");
+  const lastClose = text.lastIndexOf(">");
+  if (lastOpen > lastClose) {
+    return true;
+  }
+  return /^\s*$/.test(text.slice(lastClose + 1));
+}
+
+type ToolCallXmlOutcome = {
+  text: string;
+  /** True when appending text without `<` cannot change this result. */
+  appendSafe: boolean;
+};
+
 function stripToolCallXmlTagsInternal(
   text: string,
   options: StripToolCallXmlOptions,
   streaming: boolean,
   resolveCodeRegions = findCodeRegions,
 ): string {
+  return stripToolCallXmlTagsOutcome(text, options, streaming, resolveCodeRegions).text;
+}
+
+function stripToolCallXmlTagsOutcome(
+  text: string,
+  options: StripToolCallXmlOptions,
+  streaming: boolean,
+  resolveCodeRegions = findCodeRegions,
+): ToolCallXmlOutcome {
   if (
     !text ||
     (!TOOL_CALL_QUICK_RE.test(text) &&
       !(streaming && isToolCallTagPrefix(text, text.lastIndexOf("<"))))
   ) {
-    return text;
+    return { text, appendSafe: !hasUnsettledXmlTail(text) };
   }
   const codeRegions = resolveCodeRegions(text);
   // A lone transport opener is scaffolding unless Markdown owns it as code.
   if (/^\s*<tool_call>\s*$/i.test(text) && !isInsideCode(text.indexOf("<"), codeRegions)) {
-    return "";
+    return { text: "", appendSafe: false };
   }
 
   let result = "";
@@ -321,7 +350,11 @@ function stripToolCallXmlTagsInternal(
       toolCallBlockTagName === null &&
       ((tag?.isTruncated && !tag.isClose) || isToolCallTagPrefix(text, idx))
     ) {
-      return unwrapStandaloneParameterTags(result + text.slice(lastIndex, idx));
+      // A tag head still being streamed can be completed by the next append.
+      return {
+        text: unwrapStandaloneParameterTags(result + text.slice(lastIndex, idx)),
+        appendSafe: false,
+      };
     }
     if (!tag) {
       continue;
@@ -437,7 +470,10 @@ function stripToolCallXmlTagsInternal(
     result += text.slice(toolCallBlockStart);
   }
 
-  return unwrapStandaloneParameterTags(result);
+  return {
+    text: unwrapStandaloneParameterTags(result),
+    appendSafe: toolCallBlockTagName === null && !hasUnsettledXmlTail(text),
+  };
 }
 
 export function toolCallXmlTextFilter(
@@ -450,18 +486,41 @@ export function toolCallXmlTextFilter(
       let scannedThrough = 0;
       let active = false;
       let codeRegions: ReturnType<typeof findCodeRegions> | undefined;
+      // The canonical parse owns every decision; these fields only let an append
+      // that cannot change any of them reuse its result instead of re-parsing.
+      let parsedOutput = "";
+      let parsedAppendSafe = false;
+      let hasParsed = false;
+      let pendingAppend: string | null | undefined;
       return createConditionalTextProjector(
         (text) => {
           const regions = codeRegions;
           codeRegions = undefined;
-          return stripToolCallXmlTagsInternal(
+          const appended = pendingAppend;
+          pendingAppend = undefined;
+          if (
+            hasParsed &&
+            parsedAppendSafe &&
+            appended !== null &&
+            appended !== undefined &&
+            !appended.includes("<")
+          ) {
+            parsedOutput += appended;
+            return parsedOutput;
+          }
+          const outcome = stripToolCallXmlTagsOutcome(
             text,
             options,
             streaming,
             () => regions ?? findCodeRegions(text),
           );
+          hasParsed = true;
+          parsedOutput = outcome.text;
+          parsedAppendSafe = outcome.appendSafe;
+          return outcome.text;
         },
         ({ text, delta }) => {
+          pendingAppend = delta;
           if (active) {
             return true;
           }
