@@ -4,7 +4,7 @@ import type {
   SessionsUsageAggregates,
 } from "../../../../src/shared/usage-types.js";
 import { SettingsSection } from "../../components/solid/settings-ui.tsx";
-import "../../components/session-owner-chip.ts";
+import "../../components/solid/session-owner-chip.tsx";
 import { presenceViewerLabel } from "../../lib/presence-users.ts";
 import { t } from "../../lib/reactive/i18n.ts";
 import { formatUsageCost, formatUsageTokens } from "./metrics.ts";
@@ -52,11 +52,7 @@ export function UsageCreatorFilter(props: {
     <select
       class="usage-select usage-creator-filter"
       aria-label={t("usage.creators.select")}
-      onChange={(event: Event) => {
-        // SAFETY: This listener is attached directly to the identity select.
-        const key = (event.currentTarget as HTMLSelectElement).value;
-        props.onSelect(key || null);
-      }}
+      onChange={(event) => props.onSelect(event.currentTarget.value || null)}
     >
       <option value="" selected={props.selectedKey === null}>
         {t("usage.creators.all")}
@@ -98,7 +94,7 @@ export function UsageCreators(props: UsageCreatorsProps) {
       <tbody>
         <For each={rows}>
           {(group) => (
-            <tr class={group.key === props.selectedKey ? "selected" : ""}>
+            <tr class={{ selected: group.key === props.selectedKey }}>
               <th scope="row">
                 <button
                   type="button"
@@ -123,10 +119,10 @@ export function UsageCreators(props: UsageCreatorsProps) {
                   </span>
                 </button>
               </th>
-              <td class={props.mode === "tokens" ? "usage-creator-primary" : ""}>
+              <td class={{ "usage-creator-primary": props.mode === "tokens" }}>
                 {formatUsageTokens(group.totals.totalTokens)}
               </td>
-              <td class={props.mode === "cost" ? "usage-creator-primary" : ""}>
+              <td class={{ "usage-creator-primary": props.mode === "cost" }}>
                 {formatUsageCost(group.totals.totalCost)}
               </td>
               <td>{group.sessionCount}</td>

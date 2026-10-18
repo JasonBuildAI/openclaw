@@ -1,6 +1,8 @@
-import { createRenderEffect, onCleanup } from "solid-js";
+import { createEffect, onCleanup } from "solid-js";
 import { t } from "../lib/reactive/i18n.ts";
-import { defineSolidBridge, type SolidBridgeElement } from "../lit/solid-bridge.ts";
+import { listen } from "../lib/reactive/listener.ts";
+import { defineSolidBridge, type SolidBridgeElement } from "../lib/solid-bridge.ts";
+import { nativeListener } from "../lib/solid-native-listener.ts";
 import "./resizable-divider.css";
 
 const DRAG_END_EVENTS = ["pointerup", "pointercancel", "blur"] as const;
@@ -28,6 +30,7 @@ defineSolidBridge<ResizableDividerProps>(
     let dragFrame = 0;
     let pendingPosition: number | null = null;
     let activePointerId: number | null = null;
+    let dragListeners: Array<() => void> = [];
 
     const handlePointerDown = (e: PointerEvent) => {
       if (e.button !== 0 || activePointerId !== null) {
@@ -46,11 +49,11 @@ defineSolidBridge<ResizableDividerProps>(
         host.setPointerCapture(e.pointerId);
       }
 
-      window.addEventListener("pointermove", handlePointerMove);
-      for (const type of DRAG_END_EVENTS) {
-        window.addEventListener(type, finishDragging);
-      }
-      host.addEventListener("lostpointercapture", finishDragging);
+      dragListeners = [
+        listen(window, "pointermove", { handleEvent: handlePointerMove }),
+        ...DRAG_END_EVENTS.map((type) => listen(window, type, finishDragging)),
+        listen(host, "lostpointercapture", finishDragging),
+      ];
 
       e.preventDefault();
       host.dispatchEvent(new CustomEvent("resize-start", { bubbles: true, composed: true }));
@@ -78,15 +81,14 @@ defineSolidBridge<ResizableDividerProps>(
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const step = e.shiftKey ? 0.05 : 0.02;
-      const ratio = currentRatio();
       let nextRatio: number | null = null;
 
       const decreaseKey = props.orientation === "horizontal" ? "ArrowUp" : "ArrowLeft";
       const increaseKey = props.orientation === "horizontal" ? "ArrowDown" : "ArrowRight";
       if (e.key === decreaseKey) {
-        nextRatio = ratio - step;
+        nextRatio = currentRatio() - step;
       } else if (e.key === increaseKey) {
-        nextRatio = ratio + step;
+        nextRatio = currentRatio() + step;
       } else if (e.key === "Home") {
         nextRatio = props.minRatio;
       } else if (e.key === "End") {
@@ -121,7 +123,8 @@ defineSolidBridge<ResizableDividerProps>(
       host.classList.remove("dragging");
       // Releasing capture can synchronously report capture loss. Remove the
       // listener first so one owner end cannot emit resize-end twice.
-      host.removeEventListener("lostpointercapture", finishDragging);
+      dragListeners.forEach((stop) => stop());
+      dragListeners = [];
       activePointerId = null;
       if (
         typeof host.releasePointerCapture === "function" &&
@@ -134,11 +137,6 @@ defineSolidBridge<ResizableDividerProps>(
         dragFrame = 0;
       }
       pendingPosition = null;
-
-      window.removeEventListener("pointermove", handlePointerMove);
-      for (const type of DRAG_END_EVENTS) {
-        window.removeEventListener(type, finishDragging);
-      }
     };
 
     function emitResize(nextRatio: number, type: "resize" | "resize-end" = "resize") {
@@ -188,34 +186,36 @@ defineSolidBridge<ResizableDividerProps>(
     }
 
     function setCurrentAriaValue(value: number) {
-      host.setAttribute("aria-valuenow", String(toAriaValue(value)));
+      setAttribute("aria-valuenow", String(toAriaValue(value)));
+    }
+
+    function setAttribute(name: string, value: string) {
+      if (host.getAttribute(name) !== value) {
+        host.setAttribute(name, value);
+      }
     }
 
     host.setAttribute("role", "separator");
     host.setAttribute("tabindex", "0");
-    host.addEventListener("pointerdown", handlePointerDown);
-    host.addEventListener("keydown", handleKeyDown);
-    createRenderEffect(
+    nativeListener("pointerdown", handlePointerDown)(host);
+    nativeListener("keydown", handleKeyDown)(host);
+    createEffect(
       () => ({
         min: toAriaValue(props.minRatio),
         max: toAriaValue(props.maxRatio),
-        value: currentRatio(),
+        value: props.splitRatio,
         label: props.label || t("common.resizeSplitView"),
         orientation: props.orientation,
       }),
       (value) => {
-        host.setAttribute("aria-valuemin", String(value.min));
-        host.setAttribute("aria-valuemax", String(value.max));
+        setAttribute("aria-valuemin", String(value.min));
+        setAttribute("aria-valuemax", String(value.max));
         setCurrentAriaValue(value.value);
-        host.setAttribute("aria-label", value.label);
-        host.setAttribute("aria-orientation", value.orientation);
+        setAttribute("aria-label", value.label);
+        setAttribute("aria-orientation", value.orientation);
       },
     );
-    onCleanup(() => {
-      host.removeEventListener("pointerdown", handlePointerDown);
-      host.removeEventListener("keydown", handleKeyDown);
-      finishDragging(new Event("disconnect"));
-    });
+    onCleanup(() => finishDragging(new Event("disconnect")));
     return undefined;
   },
   {
