@@ -57,6 +57,35 @@ const sources: Array<[string, string]> = [
   ["token beside punctuation", "Hello<|assistant|>."],
   ["markup without tokens", "<div>x</div>\n<|assistant|>done"],
   ["plain prose without tokens", "The gateway streams the reply without control tokens."],
+  [
+    "token restored when a reference definition is invalidated",
+    "![a `<|assistant|>`][id]\n\n[id]: /url x",
+  ],
+  [
+    "token restored when a definition title is invalidated",
+    '![a `<|assistant|>`][id]\n\n[id]: /url "t" x',
+  ],
+  [
+    "token restored when a next-line definition is invalidated",
+    "![a `<|assistant|>`][id]\n\n[id]:\n/url x",
+  ],
+  [
+    "tokens restored when a collapsed definition is invalidated",
+    "![a `<|assistant|>`][]\n\n[a `<|assistant|>`]: /url x",
+  ],
+  [
+    "tokens restored when a shortcut definition is invalidated",
+    "![a `<|assistant|>`]\n\n[a `<|assistant|>`]: /url x",
+  ],
+  ["token stripped when a standalone definition settles", "[a `<|assistant|>`]: /url"],
+  ["token kept when a standalone definition is invalidated", "[a `<|assistant|>`]: /url x"],
+  ["token stripped in a definition after a settled paragraph", "hi\n\n[a `<|assistant|>`]: /url"],
+  ["token kept while a definition title is still open", '[a `<|assistant|>`]: /url "t'],
+  ["token kept inside link text with a destination", "[a `<|assistant|>`](url) stays visible."],
+  [
+    "token kept inside an unresolved reference label",
+    "[a `<|assistant|>`][missing] stays visible.",
+  ],
 ];
 
 describe("model special token streaming", () => {
@@ -215,5 +244,27 @@ describe("model special token streaming", () => {
     expect(projection.text).toBe(answer);
     // The canonical scan may run for the token's deltas, never for every later delta.
     expect(tokenScanCharacters).toBeLessThan(source.length * 4);
+  });
+
+  it("matches the batch transform when a standalone definition revokes a kept token", () => {
+    const source = "[a `<|assistant|>`]: /url";
+    const batch = stripModelSpecialTokens(source);
+    expect(batch).toBe("[a ``]: /url");
+    for (const chunkSize of chunkSizes) {
+      const result = streamSource(source, chunkSize);
+      expect(result.text, `definition label text at ${chunkSize} chars`).toBe(batch);
+      expect(result.delivered, `definition label deltas at ${chunkSize} chars`).toBe(batch);
+    }
+  });
+
+  it("restores a stripped token when a definition suffix invalidates it", () => {
+    const source = "![a `<|assistant|>`][id]\n\n[id]: /url x";
+    const batch = stripModelSpecialTokens(source);
+    expect(batch).toBe("![a `<|assistant|>`][id]\n\n[id]: /url x");
+    for (const chunkSize of chunkSizes) {
+      const result = streamSource(source, chunkSize);
+      expect(result.text, `restored token text at ${chunkSize} chars`).toBe(batch);
+      expect(result.delivered, `restored token deltas at ${chunkSize} chars`).toBe(batch);
+    }
   });
 });
