@@ -56,23 +56,110 @@ function endsWithTokenBeforeIncompleteSurrogate(text: string): boolean {
   return /[\uD800-\uDBFF]$/u.test(text) && endsWithCompleteToken(text.slice(0, -1));
 }
 
+type CodeSpan = { start: number; end: number };
+
 /**
- * Strips leaked model control tokens like `<|assistant|>` or full-width pipe variants.
- * Code examples are preserved; remove this when providers stop emitting these tokens.
- *
- * @see https://github.com/openclaw/openclaw/issues/40020
+ * Code spans inside image syntax keep their ownership only until the image resolves:
+ * an inline `)` completes it, and a matching reference definition can revoke it at any
+ * later character. While a kept token still sits in one of those spans, appends cannot
+ * be trusted and the canonical transform must re-check the ownership. This mirrors the
+ * bracket walk the canonical parser uses for image-code retention.
  */
-export function stripModelSpecialTokens(text: string): string {
+function findRevocableImageCode(
+  text: string,
+  regions: ReadonlyArray<{ start: number; end: number; block: boolean }>,
+  keptTokens: readonly CodeSpan[],
+): boolean {
+  if (keptTokens.length === 0) {
+    return false;
+  }
+  const isRevoked = (ranges: readonly CodeSpan[]) =>
+    ranges.some((range) =>
+      keptTokens.some((token) => token.start < range.end && token.end > range.start),
+    );
+  const brackets: Array<{ image: boolean; ranges: CodeSpan[] }> = [];
+  // The `(`…`)` destination/title that follows an image label is part of the image
+  // syntax, so code spans inside it lose ownership when its closing paren completes.
+  let tail: { ranges: CodeSpan[] } | undefined;
+  let tailDepth = 0;
+  let regionIndex = 0;
+  for (let cursor = 0; cursor < text.length; cursor += 1) {
+    const region = regions[regionIndex];
+    if (region?.start === cursor) {
+      if (!region.block) {
+        const span = { start: region.start, end: region.end };
+        if (tail) {
+          tail.ranges.push(span);
+        } else {
+          for (const bracket of brackets) {
+            if (bracket.image) {
+              bracket.ranges.push(span);
+            }
+          }
+        }
+      }
+      cursor = region.end - 1;
+      regionIndex += 1;
+      continue;
+    }
+    const char = text[cursor];
+    if (tail) {
+      if (char === "\\") {
+        cursor += 1;
+      } else if (char === "(") {
+        tailDepth += 1;
+      } else if (char === ")") {
+        tailDepth -= 1;
+        if (tailDepth === 0) {
+          if (isRevoked(tail.ranges)) {
+            return true;
+          }
+          tail = undefined;
+        }
+      }
+      continue;
+    }
+    if (char === "\\") {
+      cursor += 1;
+    } else if (char === "!" && text[cursor + 1] === "[") {
+      brackets.push({ image: true, ranges: [] });
+      cursor += 1;
+    } else if (char === "[") {
+      brackets.push({ image: false, ranges: [] });
+    } else if (char === "]") {
+      const bracket = brackets.pop();
+      if (bracket?.image) {
+        if (isRevoked(bracket.ranges)) {
+          return true;
+        }
+        if (text[cursor + 1] === "(") {
+          tail = { ranges: [] };
+          tailDepth = 1;
+          cursor += 1;
+        }
+      }
+    }
+  }
+  if (tail && isRevoked(tail.ranges)) {
+    return true;
+  }
+  return brackets.some((bracket) => bracket.image && isRevoked(bracket.ranges));
+}
+
+type ProjectedTokenText = { text: string; imageCodeRisk: boolean };
+
+function projectModelSpecialTokens(text: string): ProjectedTokenText {
   if (!text) {
-    return text;
+    return { text, imageCodeRisk: false };
   }
   MODEL_SPECIAL_TOKEN_RE.lastIndex = 0;
   if (!MODEL_SPECIAL_TOKEN_RE.test(text)) {
-    return text;
+    return { text, imageCodeRisk: false };
   }
   MODEL_SPECIAL_TOKEN_RE.lastIndex = 0;
 
   const codeRegions = findCodeRegions(text);
+  const keptTokens: CodeSpan[] = [];
   let out = "";
   let cursor = 0;
   for (const match of text.matchAll(MODEL_SPECIAL_TOKEN_RE)) {
@@ -82,6 +169,7 @@ export function stripModelSpecialTokens(text: string): string {
     out += text.slice(cursor, start);
     if (codeRegions.some((region) => start < region.end && end > region.start)) {
       out += matched;
+      keptTokens.push({ start, end });
     } else if (
       // Retained text handles adjacent tokens; two code units preserve astral letters.
       // Keep alternation: Node 26.5's V8 misses astral letters in `$`-anchored `u` classes.
@@ -94,14 +182,25 @@ export function stripModelSpecialTokens(text: string): string {
     cursor = end;
   }
   out += text.slice(cursor);
-  return out;
+  return { text: out, imageCodeRisk: findRevocableImageCode(text, codeRegions, keptTokens) };
+}
+
+/**
+ * Strips leaked model control tokens like `<|assistant|>` or full-width pipe variants.
+ * Code examples are preserved; remove this when providers stop emitting these tokens.
+ *
+ * @see https://github.com/openclaw/openclaw/issues/40020
+ */
+export function stripModelSpecialTokens(text: string): string {
+  return projectModelSpecialTokens(text).text;
 }
 
 /**
  * Streams the same stripping without re-parsing the settled prefix after a leak. Once a
  * token has appeared, deltas that cannot start or complete one append directly; the
  * canonical transform only runs for an unstable tail, a token-ending separator, a backtick
- * delta, or a fence-capable tilde run that can change whether an earlier token is code-owned.
+ * delta, a fence-capable tilde run that can change whether an earlier token is code-owned,
+ * or while a kept token still depends on image syntax that a later character can resolve.
  */
 export function createModelSpecialTokenProjector(): (input: TextProjection) => TextProjection {
   let inputLength = 0;
@@ -113,10 +212,14 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
   let separatorPending = false;
   // Only a 3+ tilde run can open or close a fence, so a split run carries two characters.
   let tildeCarry = "";
+  // Image syntax can still revoke the ownership of a kept token, so no append is safe.
+  let imageCodeRisk = false;
 
   const projectFull = (text: string, delta: string | null): TextProjection => {
     inputLength = text.length;
-    const next = stripModelSpecialTokens(text);
+    const projected = projectModelSpecialTokens(text);
+    const next = projected.text;
+    imageCodeRisk = projected.imageCodeRisk;
     const nextDelta =
       delta === null ? null : next.startsWith(output) ? next.slice(output.length) : null;
     output = next;
@@ -155,6 +258,7 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
     const changesCodeOwnership =
       appended.includes("`") || appended.includes("~~~") || (tildeCarry + appended).includes("~~~");
     if (
+      imageCodeRisk ||
       pendingPrefix ||
       separatorPending ||
       TOKEN_START_RE.test(appended) ||

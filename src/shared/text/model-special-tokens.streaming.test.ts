@@ -29,6 +29,24 @@ const sources: Array<[string, string]> = [
   ["token inside a tilde fence", "~~~text\n<|assistant|>\n~~~\nVisible text."],
   ["token inside inline code", "`<|assistant|>` stays visible."],
   ["token inside inline code with trailing text", "Use `<|assistant|> tokens` carefully."],
+  [
+    "token inside an image label resolved by a late definition",
+    "![a `<|assistant|>`][id]\n\n[id]: /url\n",
+  ],
+  ["token inside an image label with an inline destination", "![a `<|assistant|>`](/img.png)\n"],
+  ["token inside an image title with an inline destination", '![a](/u "ti `<|assistant|>`tle")\n'],
+  [
+    "token inside an image label with a non-matching definition",
+    "![a `<|assistant|>`][id]\n\n[other]: /url\n",
+  ],
+  [
+    "token inside a shortcut image label resolved later",
+    "![a `<|assistant|>`]\n\n[a `<|assistant|>`]: /url\n",
+  ],
+  [
+    "token inside an image label whose definition continues on the next line",
+    "![a `<|assistant|>`][id]\n\n[id]:\n /url\n",
+  ],
   ["escaped backtick before an inline token", "Use \\` and `<|assistant|> tokens` here."],
   ["closer run revokes an inline span", "`<|assistant|>``"],
   ["longer closer run revokes an inline span", "`<|assistant|>```"],
@@ -96,6 +114,29 @@ describe("model special token streaming", () => {
     }
   });
 
+  it("matches the batch transform when a late definition revokes a kept token", () => {
+    const source = "![a `<|assistant|>`][id]\n\n[id]: /url\n";
+    const batch = stripModelSpecialTokens(source);
+    expect(batch).toBe("![a ``][id]\n\n[id]: /url\n");
+    for (const chunkSize of chunkSizes) {
+      const result = streamSource(source, chunkSize);
+      expect(result.text, `revoked token text at ${chunkSize} chars`).toBe(batch);
+      expect(result.delivered, `revoked token deltas at ${chunkSize} chars`).toBe(batch);
+    }
+  });
+
+  it("matches the delivery profile when image completion revokes a kept token", () => {
+    const source = "![a `<|assistant|>`](/img.png)";
+    const batch = sanitizeAssistantVisibleTextWithProfile(source, "delivery", false);
+    expect(batch).toBe("![a ``](/img.png)");
+    for (const chunkSize of chunkSizes) {
+      const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
+      for (let offset = 0; offset < source.length; offset += chunkSize) {
+        projection.append(source.slice(offset, offset + chunkSize));
+      }
+      expect(projection.text, `completed image at ${chunkSize} chars`).toBe(batch);
+    }
+  });
   it("scans a bounded prefix with tilde-dense prose", () => {
     const source = `<|assistant|>${"Latency is about ~12 ms at ~50% load. ".repeat(500).trimEnd()}`;
     expect(source.length).toBeGreaterThan(16_000);
