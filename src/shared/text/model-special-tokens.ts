@@ -247,8 +247,10 @@ function findUnsettledReferenceCode(
   keptTokens: readonly CodeSpan[],
   strippedTokens: readonly CodeSpan[],
   definitions: readonly ReferenceDefinition[],
+  textSpans: ReadonlyArray<readonly [number, number]>,
 ): boolean {
   const lastBlank = findLastBlankLine(text);
+  const textStarts = new Set(textSpans.map(([start]) => start));
   if (strippedTokens.length > 0) {
     const unsettled = definitions.filter((definition) => definition.end > lastBlank);
     for (const definition of unsettled) {
@@ -272,8 +274,8 @@ function findUnsettledReferenceCode(
     if (open < 0 || open <= lastBlank || text[open - 1] === "\\" || text[open - 1] === "!") {
       continue;
     }
-    // Only a bracket at a (up to three space) line start can become a definition label.
-    if (!/^[ \t]{0,3}$/.test(text.slice(text.lastIndexOf("\n", open - 1) + 1, open))) {
+    // The block parser owns container-prefix normalization, including quotes and list items.
+    if (!textStarts.has(open)) {
       continue;
     }
     const close = text.indexOf("]", open + 1);
@@ -302,7 +304,9 @@ function projectModelSpecialTokens(text: string): ProjectedTokenText {
   }
   MODEL_SPECIAL_TOKEN_RE.lastIndex = 0;
 
-  const ownership = /[`~\t]| {4}/u.test(text) ? findCodeOwnership(text) : undefined;
+  const ownership = /[`~\t]| {4}/u.test(text)
+    ? findCodeOwnership(text, { includeText: true })
+    : undefined;
   const codeRegions = ownership?.regions ?? [];
   const keptTokens: CodeSpan[] = [];
   const strippedTokens: CodeSpan[] = [];
@@ -340,6 +344,7 @@ function projectModelSpecialTokens(text: string): ProjectedTokenText {
         keptTokens,
         strippedTokens,
         ownership.definitions,
+        ownership.textSpans,
       ));
   return { text: out, referenceCodeRisk };
 }

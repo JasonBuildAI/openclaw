@@ -80,6 +80,10 @@ const sources: Array<[string, string]> = [
   ["token stripped when a standalone definition settles", "[a `<|assistant|>`]: /url"],
   ["token kept when a standalone definition is invalidated", "[a `<|assistant|>`]: /url x"],
   ["token stripped in a definition after a settled paragraph", "hi\n\n[a `<|assistant|>`]: /url"],
+  ["token stripped in a blockquote definition", "> [a `<|assistant|>`]: /url"],
+  ["token stripped in an unordered-list definition", "- [a `<|assistant|>`]: /url"],
+  ["token stripped in an ordered-list definition", "1. [a `<|assistant|>`]: /url"],
+  ["token stripped in a container-nested definition", "> - [a `<|assistant|>`]: /url"],
   ["token kept while a definition title is still open", '[a `<|assistant|>`]: /url "t'],
   ["token kept inside link text with a destination", "[a `<|assistant|>`](url) stays visible."],
   [
