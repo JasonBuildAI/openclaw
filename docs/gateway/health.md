@@ -38,6 +38,11 @@ refreshes retain the existing read-only SQLite fallback.
 These summaries wait for current selection metadata. Display preparation and
 background model catalog discovery can continue independently, so a large fleet's
 catalog warmup does not hold session counts and recent-activity summaries open.
+Startup prepares selection and database facts for the roster; full display rows
+and optional transcript previews are prepared when a page or session recipient
+first requests them. Those rows stay resident for subsequent reads and refresh
+from committed changes. Unrequested rows do not repeat display enrichment when
+the startup model catalog becomes available.
 
 ## Deep diagnostics
 
@@ -101,7 +106,7 @@ The Gateway exposes three unauthenticated `GET`/`HEAD` check pairs:
 The HTTP listener opens before the initial session projection is complete. During
 that build, `/healthz` can return `200`, while `/startupz` and `/readyz` remain
 pending. Other HTTP requests and WebSocket upgrades wait for the complete
-projection before authentication and routing; they never see a partial roster.
+roster metadata before authentication and routing; they never see a partial roster.
 Discovery and remote-skill listeners run alongside projection preparation. The
 initial fleet-wide skills scan runs in tracked maintenance after readiness;
 on-demand skill reads still prepare the requested workspace. Readiness
@@ -155,6 +160,12 @@ Gateway completes shutdown instead of attempting an in-process restart; inspect
 the logs and restart through the service owner.
 
 A broken Telegram or other channel account can also make `/readyz` return `503` while `/startupz` remains started. Neither check replaces the other: startup completion alone does not certify agent or channel availability.
+
+Detailed readiness responses also include `coreReady`, which excludes channel
+availability while retaining startup, drain, database admission, child-runtime,
+and plugin-replacement checks. Updates can complete with channel warnings when
+the core is ready. HTTP status and `ready` still include channel health, including
+for ordinary service start and traffic admission.
 
 Disabled, unconfigured, and ordinarily unlinked accounts do not fail channel readiness. An enabled, configured account with a recorded terminal disconnect, blocked lifecycle, or unavailable ingress still fails its health check even if it becomes unlinked. For example, a terminal WhatsApp logout makes `/readyz` return `503` with `failing: ["whatsapp"]` in detailed responses. Terminal disconnects and blocked accounts require operator action; the health monitor does not restart them.
 
@@ -304,11 +315,17 @@ gateway refreshes that cache in the background; `--verbose` forces a live check 
 Connections and cached health reads share a one-minute background refresh cadence, so
 repeated diagnostic connections do not each rebuild the health snapshot. Explicit live
 checks and refreshes for missing or stale health still run immediately.
-The passive WebSocket `health` event sends the full snapshot only when health changes.
+The passive WebSocket `health` event sends a snapshot only when health changes.
+Clients advertising `health-summary` receive it without agent heartbeat configuration
+and session activity summaries; request the `health` RPC for those details. Other
+clients retain the full event payload.
 Refresh timestamps, check duration, session activity summaries, channel traffic
-timestamps, auth age, and event-loop sample readings alone do not trigger an event.
-Channel lifecycle and error changes, event-loop degradation, and other health status
-changes still publish on the next refresh. Use `tick` for connection liveness and the
+timestamps, busy/run counters, run start times, auth age, and event-loop sample
+readings alone do not trigger an event. Event-loop degradation triggers an event
+only after the sampler observes it continuously for at least one minute; recovery
+and channel lifecycle, error, and other health status changes publish on the next
+refresh. Full snapshots still include current diagnostic samples, even when those
+samples do not independently trigger an event. Use `tick` for connection liveness and the
 `health` RPC for current diagnostic readings; hello snapshots retain their health field.
 Snapshots describe loaded and configured channels. Stored credentials alone do not
 activate a channel or add it to Gateway health; use channel setup to enable it.

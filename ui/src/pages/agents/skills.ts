@@ -1,73 +1,70 @@
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { SkillStatusReport } from "../../api/types.ts";
-import { resolveAgentSkillsFilter } from "../../lib/agents/display.ts";
-import { currentConfigObject } from "../../lib/config/config-state-model.ts";
 import type { RuntimeConfigCapability } from "../../lib/config/runtime-config-capability.ts";
-import { formatUiError } from "../../lib/format-error.ts";
-import { isWorkshopSkill } from "../../lib/skills-shared.ts";
 import { loadSkillStatusReport } from "../../lib/skills/status-report.ts";
+
+type AgentSkillsRead = {
+  agentId: string;
+  result: Promise<SkillStatusReport | undefined>;
+};
 
 export type AgentSkillsState = {
   client: GatewayBrowserClient | null;
   connected: boolean;
   requestGeneration: number;
-  agentSkillsLoading: boolean;
-  agentSkillsError: string | null;
+  agentSkillsRead: AgentSkillsRead | null;
+  agentSkillsUpdateError: string | null;
   agentSkillsReport: SkillStatusReport | null;
   agentSkillsAgentId: string | null;
 };
 
-export async function loadAgentSkills(state: AgentSkillsState, agentId: string) {
+export function createAgentSkillsReader(state: AgentSkillsState) {
+  let pending: AgentSkillsRead["result"] | null = null;
+  return {
+    refresh(agentId: string) {
+      if (!state.client || !state.connected || pending) {
+        return;
+      }
+      state.agentSkillsUpdateError = null;
+      const result = readAgentSkills(state, agentId);
+      pending = result;
+      state.agentSkillsRead = { agentId, result };
+      // The page issues reads before the panel mounts; Errored owns their visible failure.
+      void result
+        .finally(() => {
+          if (pending === result) {
+            pending = null;
+          }
+        })
+        .catch(() => {});
+    },
+    reset() {
+      pending = null;
+      state.agentSkillsRead = null;
+    },
+  };
+}
+
+async function readAgentSkills(
+  state: AgentSkillsState,
+  agentId: string,
+): Promise<SkillStatusReport | undefined> {
   const client = state.client;
-  if (!client || !state.connected || state.agentSkillsLoading) {
-    return;
+  if (!client || !state.connected) {
+    return undefined;
   }
   const generation = state.requestGeneration;
   const isCurrent = () =>
     state.client === client && state.connected && state.requestGeneration === generation;
-  state.agentSkillsLoading = true;
-  state.agentSkillsError = null;
-  try {
-    const res = await loadSkillStatusReport(client, agentId);
-    if (res && isCurrent()) {
-      state.agentSkillsReport = res;
-      state.agentSkillsAgentId = agentId;
-    }
-  } catch (err) {
-    if (isCurrent()) {
-      state.agentSkillsError = formatUiError(err);
-    }
-  } finally {
-    if (isCurrent()) {
-      state.agentSkillsLoading = false;
-    }
+  const report = await loadSkillStatusReport(client, agentId);
+  if (!isCurrent()) {
+    return undefined;
   }
-}
-
-/**
- * Allowlist after toggling one skill. Without an existing filter, the first toggle snapshots
- * the reported skills, leaving out learned Workshop skills: they bypass allowlists.
- */
-function nextAgentSkillAllowlist(params: {
-  configured: string[] | undefined;
-  report: SkillStatusReport | null;
-  skillName: string;
-  enabled: boolean;
-}): string[] {
-  const next = new Set(
-    params.configured ??
-      params.report?.agentSkillFilter ??
-      params.report?.skills
-        .filter((skill) => skill.name && !isWorkshopSkill(skill))
-        .map((skill) => skill.name) ??
-      [],
-  );
-  if (params.enabled) {
-    next.add(params.skillName);
-  } else {
-    next.delete(params.skillName);
+  if (report) {
+    state.agentSkillsReport = report;
+    state.agentSkillsAgentId = agentId;
   }
-  return [...next];
+  return report;
 }
 
 export async function clearAgentSkillFilter(
@@ -95,43 +92,4 @@ export async function clearAgentSkillFilter(
     replacePaths: [`agents.entries.${targetKey}.skills`],
     canDispatch,
   });
-}
-
-export function createAgentSkillActions(params: {
-  getRuntimeConfig: () => RuntimeConfigCapability;
-  getReport: () => SkillStatusReport | null;
-  canUpdate: (agentId: string) => boolean;
-}) {
-  return {
-    onToggle: (agentId: string, skillName: string, enabled: boolean) => {
-      if (!params.canUpdate(agentId)) {
-        return;
-      }
-      const target = params.getRuntimeConfig().agentEntry(agentId, { ensure: true });
-      if (!target || !skillName.trim()) {
-        return;
-      }
-      params.getRuntimeConfig().patchForm(
-        [...target.path, "skills"],
-        nextAgentSkillAllowlist({
-          configured: resolveAgentSkillsFilter(
-            currentConfigObject(params.getRuntimeConfig().state),
-            agentId,
-          ),
-          report: params.getReport(),
-          skillName: skillName.trim(),
-          enabled,
-        }),
-      );
-    },
-    onDisableAll: (agentId: string) => {
-      if (!params.canUpdate(agentId)) {
-        return;
-      }
-      const target = params.getRuntimeConfig().agentEntry(agentId, { ensure: true });
-      if (target) {
-        params.getRuntimeConfig().patchForm([...target.path, "skills"], []);
-      }
-    },
-  };
 }

@@ -592,15 +592,14 @@ describe("npm rollback content diagnostics", () => {
           await fs.symlink("../dist/index.js", cache);
         } else if (change === "cache during scan") {
           const lstat = fs.lstat.bind(fs);
-          let parentReads = 0;
+          let cacheReads = 0;
           vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
-            const stat = await lstat(...args);
-            if (String(args[0]) === path.dirname(cache) && ++parentReads === 2) {
-              // Replace after the parent's final observation; only the entry recheck can catch it.
+            if (String(args[0]) === cache && ++cacheReads === 2) {
+              // Substitute before this entry's recheck, independent of sibling IO order.
               await fs.unlink(cache);
               await fs.symlink("../dist/index.js", cache);
             }
-            return stat;
+            return lstat(...args);
           });
         } else {
           const before = await fs.stat(entry);
@@ -668,7 +667,7 @@ describe.skipIf(process.platform === "win32")("managed publication drift facts",
     await fs.mkdir(path.join(f.packageRoot, "nested"));
     await fs.writeFile(path.join(f.packageRoot, "nested", "a.txt"), "nested content");
     await fs.symlink("../drift-0.js", path.join(f.packageRoot, "nested", "link"));
-    // These bytes are persisted in version-1 journals; the oracle names the
+    // Private-mode digests keep the version-1 shape; the oracle names the
     // fixture's postorder explicitly instead of replaying the reader's walk.
     const expectedEntries: Array<[string, "file" | "directory" | "symlink"]> = [
       ["dist/index.js", "file"],
@@ -693,7 +692,7 @@ describe.skipIf(process.platform === "win32")("managed publication drift facts",
       const stat = await fs.lstat(file, { bigint: true });
       const tuple = [
         `${stat.dev}:${stat.ino}`,
-        String(stat.mode),
+        String(kind === "symlink" ? stat.mode : stat.mode & ~0o077n),
         String(stat.uid),
         String(stat.gid),
       ];

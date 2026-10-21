@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { requireDirectorySync, syncDirectory } from "./directory-durability.js";
+import { ignoreMissingPath } from "./errno.js";
 import { formatErrorMessage, hasErrnoCode } from "./errors.js";
 import { retainMutationAuthority } from "./mutation-authority.js";
 import {
@@ -40,6 +40,7 @@ import {
 } from "./package-update-filesystem.js";
 import {
   createPackageIntegrityReader,
+  packageIntegrityMatches,
   type PackageIntegrityFingerprint,
 } from "./package-update-integrity.js";
 import {
@@ -62,7 +63,12 @@ export function createPublicationOwner(
   let record = initial;
   let descriptor = record.descriptor;
   let privateCandidate = freshlyPrepared;
-  const trees = createPackagePublicationTreeMatcher(descriptor, onWarning, () => privateCandidate);
+  const trees = createPackagePublicationTreeMatcher(
+    descriptor,
+    onWarning,
+    () => privateCandidate,
+    assertion,
+  );
   const matches = trees.matches;
   let retirementSelected: "previous" | "candidate" | undefined;
   const live = descriptor.authority.installKey;
@@ -134,9 +140,7 @@ export function createPublicationOwner(
     try {
       currentAnchor = privatePackageActivationIdentity(custodyPath("anchor"), "anchor");
     } catch (error) {
-      if (!hasErrnoCode(error, "ENOENT")) {
-        throw error;
-      }
+      ignoreMissingPath(error);
       currentAnchor = null;
     }
     if (
@@ -348,7 +352,7 @@ export function createPublicationOwner(
     transition("publishing", { kind: "copy-previous", identity });
     const reader = createPackageIntegrityReader();
     const source = await reader.tree(live, live, descriptor.previous);
-    if (!isDeepStrictEqual(source, descriptor.previous)) {
+    if (!packageIntegrityMatches(descriptor.previous, source)) {
       throw new Error("Package copy source changed.");
     }
     await copyPackagePublicationTree(live, copyRoot, assertCopy);
