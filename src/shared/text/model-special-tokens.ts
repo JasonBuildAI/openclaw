@@ -168,6 +168,40 @@ function wrappedInBackticks(text: string, token: CodeSpan, start: number, end: n
   return close !== -1 && close < end;
 }
 
+/** `]` only closes a reference label when it is neither escaped nor inside code. */
+function findReferenceLabelClose(
+  text: string,
+  open: number,
+  regions: ReadonlyArray<{ start: number; end: number; block: boolean }>,
+): number {
+  let regionIndex = 0;
+  for (const region of regions) {
+    if (region.end > open + 1) {
+      break;
+    }
+    regionIndex += 1;
+  }
+  for (let cursor = open + 1; cursor < text.length; cursor += 1) {
+    const region = regions[regionIndex];
+    if (region?.start === cursor) {
+      cursor = region.end - 1;
+      regionIndex += 1;
+      continue;
+    }
+    if (text[cursor] !== "]") {
+      continue;
+    }
+    let backslashes = 0;
+    for (let before = cursor - 1; before >= 0 && text[before] === "\\"; before -= 1) {
+      backslashes += 1;
+    }
+    if (backslashes % 2 === 0) {
+      return cursor;
+    }
+  }
+  return -1;
+}
+
 /**
  * Visits each image-syntax range (label content, reference label, and destination/title)
  * in order. Code regions are skipped, so markup inside code is not image syntax.
@@ -278,7 +312,7 @@ function findUnsettledReferenceCode(
     if (!textStarts.has(open)) {
       continue;
     }
-    const close = text.indexOf("]", open + 1);
+    const close = findReferenceLabelClose(text, open, regions);
     if (close !== -1 && close < token.end) {
       continue;
     }

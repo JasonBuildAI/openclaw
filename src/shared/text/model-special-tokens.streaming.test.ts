@@ -90,6 +90,10 @@ const sources: Array<[string, string]> = [
     "token kept inside an unresolved reference label",
     "[a `<|assistant|>`][missing] stays visible.",
   ],
+  [
+    "token inside a definition label with an escaped closing bracket",
+    "[a \\] `<|assistant|>`]: /url",
+  ],
 ];
 
 describe("model special token streaming", () => {
@@ -259,6 +263,15 @@ describe("model special token streaming", () => {
       expect(result.text, `definition label text at ${chunkSize} chars`).toBe(batch);
       expect(result.delivered, `definition label deltas at ${chunkSize} chars`).toBe(batch);
     }
+  });
+
+  it("matches the batch transform when an escaped bracket precedes a definition token", () => {
+    const source = "[a \\] `<|assistant|>`]: /url";
+    const batch = stripModelSpecialTokens(source);
+    expect(batch).toBe("[a \\] ``]: /url");
+    const projection = createTextProjection([modelSpecialTokensTextFilter]);
+    projection.append("[a \\] `<|assistant|>`");
+    expect(projection.append("]: /url").text).toBe(batch);
   });
 
   it("restores a stripped token when a definition suffix invalidates it", () => {
