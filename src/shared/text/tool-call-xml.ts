@@ -505,7 +505,6 @@ export function toolCallXmlTextFilter(
             // Markdown ownership can only matter for a candidate that could begin a
             // tool-call tag; ordinary markup must not re-parse the whole reply.
             const quickCandidate = TOOL_CALL_QUICK_RE.test(candidate);
-            sawQuickCandidate ||= quickCandidate;
             const prefixCandidate = isToolCallTagPrefix(candidate, 0);
             if (quickCandidate || prefixCandidate) {
               // A complete tag keeps the canonical ownership resolver; only a partial
@@ -521,6 +520,7 @@ export function toolCallXmlTextFilter(
               codeRegions ??= findCodeRegions(text);
               const protectedBlock = isInsideSettledBlockCode(start, text, codeRegions);
               if (!protectedBlock && quickCandidate) {
+                sawQuickCandidate = true;
                 active = true;
                 return true;
               }

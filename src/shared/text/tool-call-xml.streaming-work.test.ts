@@ -88,6 +88,27 @@ describe("toolCallXmlTextFilter streamed projection work", () => {
     }
   });
 
+  it("keeps the partial-prefix fast path after a fenced tool-call example", () => {
+    const source = `\`\`\`xml\n<tool_call>{"path":"a.ts"}</tool_call>\n\`\`\`\n\n${htmlAnswer(16_000)}`;
+    const regions = vi.spyOn(codeRegions, "findCodeRegions");
+    try {
+      const projection = createTextProjection([
+        toolCallXmlTextFilter({ stripFunctionResponseAfterPluralToolCalls: true }, true),
+      ]);
+      for (let offset = 0; offset < source.length; offset += CHUNK) {
+        projection.append(source.slice(offset, offset + CHUNK));
+      }
+      expect(projection.text).toBe(source);
+      const parsedCharacters = regions.mock.calls.reduce(
+        (total, [parsed]) => total + parsed.length,
+        0,
+      );
+      expect(parsedCharacters).toBeLessThan(source.length * 2);
+    } finally {
+      regions.mockRestore();
+    }
+  });
+
   it("keeps trailing partial tag prefixes identical to one-shot output", () => {
     const sources = [
       "Before <",
