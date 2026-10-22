@@ -5,9 +5,17 @@ import {
   skipHorizontalWhitespace,
   skipWhitespace,
 } from "../../../packages/tool-call-repair/src/grammar.js";
+import {
+  advanceProtectionScanState,
+  createProtectionScanState,
+} from "../../../packages/tool-call-repair/src/protection-fast-path.js";
 import { findCodeRegions, isInsideCode, isInsideSettledBlockCode } from "./code-regions.js";
 import { isGlmArgPayload } from "./glm-arg-key-payload.js";
-import { createConditionalTextProjector, type TextFilter } from "./text-projection.js";
+import {
+  createConditionalTextProjector,
+  type TextFilter,
+  type TextProjection,
+} from "./text-projection.js";
 import { createQuotedStringScanner, parseXmlTagAt, type ParsedToolCallTag } from "./xml-tag-at.js";
 
 const TOOL_CALL_QUICK_RE =
@@ -468,7 +476,8 @@ export function toolCallXmlTextFilter(
         }
         return /[\r\n]/.test(text.slice(span.start, pos));
       };
-      return createConditionalTextProjector(
+      let sawQuickCandidate = false;
+      const project = createConditionalTextProjector(
         (text) => {
           const regions = codeRegions;
           codeRegions = undefined;
@@ -496,6 +505,7 @@ export function toolCallXmlTextFilter(
             // Markdown ownership can only matter for a candidate that could begin a
             // tool-call tag; ordinary markup must not re-parse the whole reply.
             const quickCandidate = TOOL_CALL_QUICK_RE.test(candidate);
+            sawQuickCandidate ||= quickCandidate;
             const prefixCandidate = isToolCallTagPrefix(candidate, 0);
             if (quickCandidate || prefixCandidate) {
               // A complete tag keeps the canonical ownership resolver; only a partial
@@ -526,6 +536,56 @@ export function toolCallXmlTextFilter(
           return false;
         },
       );
+      if (!streaming) {
+        return project;
+      }
+      const protectionScan = createProtectionScanState();
+      // Hold a possibly tool-call prefix only while the carried scan proves this is
+      // ordinary top-level text; fences and ambiguous Markdown stay canonical.
+      const canHoldPartialTag = () =>
+        !protectionScan.fenceChar &&
+        !protectionScan.paragraphAmbiguous &&
+        !protectionScan.structuralUnknown;
+      let projectedSource = "";
+      let consumed = 0;
+      let pendingPrefixStart: number | undefined;
+      return (input: TextProjection) => {
+        const appended = input.delta ?? input.text;
+        advanceProtectionScanState(protectionScan, appended);
+        if (pendingPrefixStart !== undefined) {
+          if (!sawQuickCandidate && isToolCallTagPrefix(input.text, pendingPrefixStart)) {
+            return project({ text: projectedSource, delta: "" });
+          }
+          pendingPrefixStart = undefined;
+        }
+
+        let safeEnd = input.text.length;
+        if (!sawQuickCandidate && input.delta !== null) {
+          const appendedStart = input.text.length - appended.length;
+          const candidateOffset = appended.lastIndexOf("<");
+          const candidateStart = candidateOffset === -1 ? -1 : appendedStart + candidateOffset;
+          // Only this delta can begin a new prefix; earlier bytes are settled.
+          if (candidateStart >= consumed) {
+            const candidate = input.text.slice(candidateStart);
+            if (
+              isToolCallTagPrefix(candidate, 0) &&
+              canHoldPartialTag() &&
+              !TOOL_CALL_QUICK_RE.test(input.text.slice(consumed, candidateStart))
+            ) {
+              pendingPrefixStart = candidateStart;
+              safeEnd = candidateStart;
+            }
+          }
+        }
+
+        const safeDelta = input.text.slice(consumed, safeEnd);
+        projectedSource += safeDelta;
+        consumed = safeEnd;
+        return project({
+          text: projectedSource,
+          delta: input.delta === null ? null : safeDelta,
+        });
+      };
     },
   };
 }

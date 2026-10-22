@@ -33,6 +33,12 @@ function jsxAnswer(sections: number): string {
   return parts.join("\n");
 }
 
+/** An ordinary HTML answer whose line length periodically leaves "<p" at a delta edge. */
+function htmlAnswer(size: number, lineBreak = true): string {
+  const line = "<details><summary>Result</summary><p>ordinary text</p></details>";
+  return `${line}${lineBreak ? "\n" : ""}`.repeat(Math.floor(size / (line.length + 1)));
+}
+
 describe("toolCallXmlTextFilter streamed projection work", () => {
   it("does not parse Markdown ownership for ordinary HTML/JSX markup", () => {
     const source = jsxAnswer(20);
@@ -53,6 +59,55 @@ describe("toolCallXmlTextFilter streamed projection work", () => {
       expect(parsedCharacters).toBeLessThan(source.length * 2);
     } finally {
       regions.mockRestore();
+    }
+  });
+
+  it.each([
+    ["multiline", true],
+    ["single line", false],
+  ])("does not parse Markdown ownership for a partial ordinary tag prefix (%s)", (_, lineBreak) => {
+    const source = htmlAnswer(16_000, lineBreak);
+    const regions = vi.spyOn(codeRegions, "findCodeRegions");
+    try {
+      const projection = createTextProjection([
+        toolCallXmlTextFilter({ stripFunctionResponseAfterPluralToolCalls: true }, true),
+      ]);
+      for (let offset = 0; offset < source.length; offset += CHUNK) {
+        projection.append(source.slice(offset, offset + CHUNK));
+      }
+      expect(projection.text).toBe(source);
+      // A trailing "<p" can still become <parameter>; resolving that ambiguity must
+      // not reparse the whole Markdown document at every repeated tag boundary.
+      const parsedCharacters = regions.mock.calls.reduce(
+        (total, [parsed]) => total + parsed.length,
+        0,
+      );
+      expect(parsedCharacters).toBeLessThan(source.length * 2);
+    } finally {
+      regions.mockRestore();
+    }
+  });
+
+  it("keeps trailing partial tag prefixes identical to one-shot output", () => {
+    const sources = [
+      "Before <",
+      "Before <p",
+      "Before </t",
+      "Before <parameter ",
+      '<tool_call>{"path":"a.ts"}</tool_call><parameter ',
+    ];
+    for (const streaming of [false, true]) {
+      for (const source of sources) {
+        const filter = toolCallXmlTextFilter(
+          { stripFunctionResponseAfterPluralToolCalls: true },
+          streaming,
+        );
+        const projection = createTextProjection([filter]);
+        for (const char of source) {
+          projection.append(char);
+        }
+        expect(projection.text).toBe(filter.transform(source));
+      }
     }
   });
 
