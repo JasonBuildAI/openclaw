@@ -209,3 +209,31 @@ it.each([1, 3, 7])("keeps a carrier reflowed across 257 spaces at %i-character d
   expect(visible).toBe("Visible reply.");
   expect(stream.text).toBe("Visible reply.");
 });
+
+it("scrubs a private block that opens a coalesced delta larger than the probe tail", () => {
+  // Provider deltas have no size limit: the trigger must inspect the whole incoming chunk, not
+  // only the retained overlap, or the block body is published without ever activating.
+  const stream = createAssistantVisibleStreamText();
+  stream.replace("");
+
+  expect(
+    stream.append(`${runtimeContext.INTERNAL_RUNTIME_CONTEXT_BEGIN}\n${"secret ".repeat(20)}`).text,
+  ).toBe("");
+  expect(stream.text).toBe("");
+  expect(stream.append(`\n${runtimeContext.INTERNAL_RUNTIME_CONTEXT_END}\nVisible`).text).toBe(
+    "Visible",
+  );
+});
+
+it("scrubs a complete private block inside one coalesced delta", () => {
+  const stream = createAssistantVisibleStreamText();
+  stream.replace("");
+  const block = [
+    runtimeContext.INTERNAL_RUNTIME_CONTEXT_BEGIN,
+    "private runtime context",
+    runtimeContext.INTERNAL_RUNTIME_CONTEXT_END,
+    "Visible reply.",
+  ].join("\n");
+
+  expect(stream.append(block).text).toBe("Visible reply.");
+});

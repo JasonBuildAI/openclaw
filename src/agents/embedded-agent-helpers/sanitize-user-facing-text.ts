@@ -256,9 +256,9 @@ function isWhitespaceOnly(value: string): boolean {
   return /^[ \t\r]*$/u.test(value);
 }
 
-/** Normalize whitespace runs to one space and keep only the bounded probe tail. */
-function appendRuntimeContextScan(tail: string, chunk: string): string {
-  let next = tail;
+/** Normalize whitespace runs to one space; the caller decides how much history to retain. */
+function normalizeRuntimeContextScan(chunk: string): string {
+  let next = "";
   for (const char of chunk) {
     const code = char.charCodeAt(0);
     if (code === 32 || (code >= 9 && code <= 13)) {
@@ -269,9 +269,7 @@ function appendRuntimeContextScan(tail: string, chunk: string): string {
     }
     next += char.toLowerCase();
   }
-  return next.length > RUNTIME_CONTEXT_STREAM_SCAN_LENGTH
-    ? next.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH)
-    : next;
+  return next;
 }
 
 /** Track whether everything published on the current line is still whitespace. */
@@ -322,15 +320,17 @@ function createRuntimeContextStreamProjector(): (input: TextProjection) => TextP
       const text = stripInternalRuntimeContext(input.text, { streaming: true });
       active = hasRuntimeContextStreamTrigger(lower) || text !== input.text;
       published = text;
-      scanTail = appendRuntimeContextScan("", lower);
+      scanTail = normalizeRuntimeContextScan(lower).slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
       atLineStart = isWhitespaceOnly(text.slice(text.lastIndexOf("\n") + 1));
       withheld = "";
       return { text, delta: null };
     }
-    // Only the newest delta can complete a generated token; the bounded tail keeps a token
-    // that spans deltas visible without rescanning the reply.
-    scanTail = appendRuntimeContextScan(scanTail, input.delta);
-    if (!active && hasRuntimeContextStreamTrigger(scanTail)) {
+    // Provider deltas have no size limit, so the trigger has to see the whole incoming chunk
+    // before only the bounded overlap is retained; otherwise a coalesced private block could
+    // publish its body without ever activating the scrub.
+    const scan = scanTail + normalizeRuntimeContextScan(input.delta);
+    scanTail = scan.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
+    if (!active && hasRuntimeContextStreamTrigger(scan)) {
       active = true;
     }
     if (active) {
