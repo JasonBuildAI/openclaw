@@ -1,10 +1,12 @@
 import { afterAll, beforeEach, expect, it, vi } from "vitest";
 import { RUNTIME_CONTEXT_HEADER } from "../../llm/types.js";
+import { createTextProjection } from "../../shared/text/text-projection.js";
 import {
   createAssistantVisibleStreamText,
   sanitizeAssistantVisibleStreamText,
 } from "../embedded-agent-utils.js";
 import * as runtimeContext from "../internal-runtime-context.js";
+import { userFacingTextFilters } from "./sanitize-user-facing-text.js";
 
 // Keep the spy for the whole module: filter arrays cache their transforms.
 const scrub = vi.spyOn(runtimeContext, "stripInternalRuntimeContext");
@@ -54,7 +56,7 @@ it.each([
     scrub.mockClear();
 
     expect(appendChunks(stream, source, 4)).toBe(initial + source);
-    expect(characters(scrub.mock.calls)).toBeLessThan(source.length);
+    expect(characters(scrub.mock.calls)).toBe(0);
   },
 );
 
@@ -73,34 +75,73 @@ it("still scrubs a complete runtime-context block", () => {
 });
 
 it.each([1, 2, 3, 5, 7])("withholds every partial delimiter at %i-character deltas", (size) => {
-  const source = [
-    "Before.",
-    runtimeContext.INTERNAL_RUNTIME_CONTEXT_BEGIN,
-    "private runtime context",
-    runtimeContext.INTERNAL_RUNTIME_CONTEXT_END,
-    "After.",
-  ].join("\n");
+  const secret = "private runtime context";
+  const shapes = [
+    ["column 0", "", "\n"],
+    ["indented", "   ", "\n"],
+    ["tab-indented", "\t", "\n"],
+    ["CRLF", "  ", "\r\n"],
+  ] as const;
   const delimiters = [
     runtimeContext.INTERNAL_RUNTIME_CONTEXT_BEGIN,
     runtimeContext.INTERNAL_RUNTIME_CONTEXT_END,
     RUNTIME_CONTEXT_HEADER,
   ];
-  const stream = createAssistantVisibleStreamText();
 
-  let visible = "";
-  for (let offset = 0; offset < source.length; offset += size) {
-    const result = stream.append(source.slice(offset, offset + size));
-    visible = result.delta === null ? result.text : visible + result.delta;
-    for (const delimiter of delimiters) {
-      for (let length = 1; length <= Math.min(delimiter.length, visible.length); length += 1) {
-        expect(visible.endsWith(delimiter.slice(0, length))).toBe(false);
-      }
+  for (const [shape, indent, newline] of shapes) {
+    const source = [
+      "Before.",
+      `${indent}${runtimeContext.INTERNAL_RUNTIME_CONTEXT_BEGIN}`,
+      secret,
+      `${indent}${runtimeContext.INTERNAL_RUNTIME_CONTEXT_END}`,
+      "After.",
+    ].join(newline);
+    const stream = createAssistantVisibleStreamText();
+    let visible = "";
+
+    for (let offset = 0; offset < source.length; offset += size) {
+      const result = stream.append(source.slice(offset, offset + size));
+      visible = result.delta === null ? result.text : visible + result.delta;
+      // The private body must never reach the accumulated preview, and the current line
+      // must never hold a delimiter prefix (including an indented one).
+      expect(visible, shape).not.toContain(secret);
+      const currentLine = visible.slice(visible.lastIndexOf("\n") + 1).trim();
+      expect(
+        currentLine === "" || !delimiters.some((delimiter) => delimiter.startsWith(currentLine)),
+        `${shape} line=${JSON.stringify(currentLine)}`,
+      ).toBe(true);
     }
-  }
 
-  expect(visible).toBe("Before.\n\nAfter.");
-  expect(stream.text).toBe("Before.\n\nAfter.");
+    expect(visible, shape).toBe("Before.\n\nAfter.");
+    expect(stream.text, shape).toBe("Before.\n\nAfter.");
+  }
 });
+
+it.each([1, 2, 3, 5, 7])(
+  "matches the canonical hold for indented delimiters at %i-character deltas",
+  (size) => {
+    const source = [
+      "Intro.",
+      `   ${runtimeContext.INTERNAL_RUNTIME_CONTEXT_BEGIN}`,
+      "private runtime context",
+      `   ${runtimeContext.INTERNAL_RUNTIME_CONTEXT_END}`,
+      "Outro.",
+    ].join("\n");
+    // The runtime filter alone, so no upstream stage can mask a missing hold.
+    const stream = createTextProjection(userFacingTextFilters(false, true));
+    const normalize = (text: string) => text.replace(/[ \t\r\n]+$/u, "");
+
+    for (let offset = 0; offset < source.length; offset += size) {
+      stream.append(source.slice(offset, offset + size));
+      const canonical = runtimeContext.stripInternalRuntimeContext(source.slice(0, offset + size), {
+        streaming: true,
+      });
+      expect(normalize(stream.text)).toBe(normalize(canonical));
+    }
+
+    expect(stream.text).toBe("Intro.\n\nOutro.");
+  },
+);
 
 it("keeps an unterminated block hidden after a replacement", () => {
   const stream = createAssistantVisibleStreamText();

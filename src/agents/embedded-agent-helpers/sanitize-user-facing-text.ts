@@ -30,6 +30,7 @@ import {
   duplicateParagraphTextFilter,
   leadingEmptyLinesTextFilter,
   type TextFilter,
+  type TextProjection,
 } from "../../shared/text/text-projection.js";
 import { EXEC_NO_OUTPUT_PLACEHOLDER } from "../bash-tools.exec-output.js";
 import {
@@ -249,7 +250,20 @@ const RUNTIME_CONTEXT_STREAM_CARRIER =
   /openclaw\s+runtime\s+(?:context|event)\b|this\s+context\s+is\s+runtime-generated\b/u;
 const RUNTIME_CONTEXT_STREAM_SCAN_LENGTH = 256;
 
-type StreamProjection = { text: string; delta: string | null };
+function isWhitespaceOnly(value: string): boolean {
+  return /^[ \t\r]*$/u.test(value);
+}
+
+/** Track whether everything published on the current line is still whitespace. */
+function advanceLineStart(atLineStart: boolean, appended: string): boolean {
+  if (appended === "") {
+    return atLineStart;
+  }
+  const lastNewline = appended.lastIndexOf("\n");
+  return lastNewline >= 0
+    ? isWhitespaceOnly(appended.slice(lastNewline + 1))
+    : atLineStart && isWhitespaceOnly(appended);
+}
 
 function hasRuntimeContextStreamTrigger(lowerText: string): boolean {
   if (RUNTIME_CONTEXT_STREAM_DELIMITERS_LOWER.some((token) => lowerText.includes(token))) {
@@ -273,7 +287,7 @@ function isPartialRuntimeContextDelimiter(line: string): boolean {
   );
 }
 
-function createRuntimeContextStreamProjector(): (input: StreamProjection) => StreamProjection {
+function createRuntimeContextStreamProjector(): (input: TextProjection) => TextProjection {
   let active = false;
   let published = "";
   let atLineStart = true;
@@ -289,7 +303,7 @@ function createRuntimeContextStreamProjector(): (input: StreamProjection) => Str
       active = hasRuntimeContextStreamTrigger(lower) || text !== input.text;
       published = text;
       scanTail = lower.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
-      atLineStart = text.length === 0 || text.endsWith("\n");
+      atLineStart = isWhitespaceOnly(text.slice(text.lastIndexOf("\n") + 1));
       withheld = "";
       return { text, delta: null };
     }
@@ -329,13 +343,11 @@ function createRuntimeContextStreamProjector(): (input: StreamProjection) => Str
     if (withheld) {
       withheld = "";
       published = input.text;
-      atLineStart = complete.endsWith("\n");
+      atLineStart = advanceLineStart(true, complete);
       return { text: input.text, delta: complete };
     }
     published = input.text;
-    if (input.delta !== "") {
-      atLineStart = input.delta.endsWith("\n");
-    }
+    atLineStart = advanceLineStart(atLineStart, input.delta);
     return input;
   };
 }
