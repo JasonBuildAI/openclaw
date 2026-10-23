@@ -112,6 +112,11 @@ describe("toolCallXmlTextFilter streamed projection work", () => {
   it("matches canonical XML projection at every chunk boundary", () => {
     const call = '<tool_call>{"path":"a.ts"}</tool_call>';
     const sources = [
+      "    <",
+      "\t<",
+      "- item\n\n      <",
+      "    < ",
+      "    <\t",
       "    <p",
       "\t<p",
       " \t<p",
@@ -166,7 +171,7 @@ describe("toolCallXmlTextFilter streamed projection work", () => {
       '[x]: / "title\n```\n<p\n"',
       "[x]: / 'title\n```\n<p\n'",
       "[x]: / (title\n```\n<p\n)",
-    ];
+    ].flatMap((source) => ["", "\n", "\r\n", "\n\n"].map((suffix) => source + suffix));
 
     for (const streaming of [false, true]) {
       const filter = toolCallXmlTextFilter(

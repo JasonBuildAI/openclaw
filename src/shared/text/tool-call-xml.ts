@@ -490,9 +490,9 @@ export function toolCallXmlTextFilter(
             const quickCandidate = TOOL_CALL_QUICK_RE.test(candidate);
             const prefixCandidate = isToolCallTagPrefix(candidate, 0);
             if (quickCandidate || prefixCandidate) {
-              if (next === -1 && prefixCandidate && !quickCandidate) {
-                // Classify the unfinished line without changing the carried scan. An
-                // indented line or inline delimiter can already own this prefix as code.
+              const onCurrentLine = candidate.length <= protectionScan.partialLine.length;
+              if (next === -1 && onCurrentLine && prefixCandidate && !quickCandidate) {
+                // Only the unfinished candidate line can be classified from the carried tail.
                 const completed = { ...protectionScan };
                 advanceProtectionScanState(completed, "\n");
                 if (!completed.paragraphAmbiguous && !completed.structuralUnknown) {
