@@ -244,14 +244,34 @@ const RUNTIME_CONTEXT_STREAM_DELIMITERS_LOWER = RUNTIME_CONTEXT_STREAM_DELIMITER
   token.toLowerCase(),
 );
 // The canonical carrier grammar accepts any whitespace between words, so a reflowed preface or
-// notice still has to activate. The scan window below bounds this probe; the final sanitizer
-// keeps ownership of arbitrarily wide whitespace.
+// notice still has to activate. The probe runs over a whitespace-normalized tail: a run of
+// arbitrary width collapses to one space, so even a carrier split by hundreds of spaces keeps
+// its recognized prefix without rescanning the accumulated reply.
 const RUNTIME_CONTEXT_STREAM_CARRIER =
   /openclaw\s+runtime\s+(?:context|event)\b|this\s+context\s+is\s+runtime-generated\b/u;
-const RUNTIME_CONTEXT_STREAM_SCAN_LENGTH = 256;
+// Longest probe ("this context is runtime-generated") plus the truncated head of the next word.
+const RUNTIME_CONTEXT_STREAM_SCAN_LENGTH = 64;
 
 function isWhitespaceOnly(value: string): boolean {
   return /^[ \t\r]*$/u.test(value);
+}
+
+/** Normalize whitespace runs to one space and keep only the bounded probe tail. */
+function appendRuntimeContextScan(tail: string, chunk: string): string {
+  let next = tail;
+  for (const char of chunk) {
+    const code = char.charCodeAt(0);
+    if (code === 32 || (code >= 9 && code <= 13)) {
+      if (!next.endsWith(" ")) {
+        next += " ";
+      }
+      continue;
+    }
+    next += char.toLowerCase();
+  }
+  return next.length > RUNTIME_CONTEXT_STREAM_SCAN_LENGTH
+    ? next.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH)
+    : next;
 }
 
 /** Track whether everything published on the current line is still whitespace. */
@@ -302,16 +322,15 @@ function createRuntimeContextStreamProjector(): (input: TextProjection) => TextP
       const text = stripInternalRuntimeContext(input.text, { streaming: true });
       active = hasRuntimeContextStreamTrigger(lower) || text !== input.text;
       published = text;
-      scanTail = lower.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
+      scanTail = appendRuntimeContextScan("", lower);
       atLineStart = isWhitespaceOnly(text.slice(text.lastIndexOf("\n") + 1));
       withheld = "";
       return { text, delta: null };
     }
     // Only the newest delta can complete a generated token; the bounded tail keeps a token
     // that spans deltas visible without rescanning the reply.
-    const scan = (scanTail + input.delta).toLowerCase();
-    scanTail = scan.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
-    if (!active && hasRuntimeContextStreamTrigger(scan)) {
+    scanTail = appendRuntimeContextScan(scanTail, input.delta);
+    if (!active && hasRuntimeContextStreamTrigger(scanTail)) {
       active = true;
     }
     if (active) {

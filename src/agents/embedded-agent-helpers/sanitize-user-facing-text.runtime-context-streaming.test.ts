@@ -183,3 +183,29 @@ it.each([1, 3, 5, 7])(
     expect(stream.text).toBe("Visible reply.");
   },
 );
+
+it.each([1, 3, 7])("keeps a carrier reflowed across 257 spaces at %i-character deltas", (size) => {
+  // Whitespace runs of arbitrary width are valid in the canonical carrier grammar: the probe
+  // must collapse them instead of letting its bounded window drop the carrier prefix.
+  const spaces = " ".repeat(257);
+  const source = [
+    `OpenClaw${spaces}runtime event.`,
+    `This${spaces}context is runtime-generated, not user-authored. Keep internal details private.`,
+    "",
+    "Visible reply.",
+  ].join("\n");
+  const stream = createAssistantVisibleStreamText();
+  let visible = stream.text;
+  let prefix = "";
+
+  for (let offset = 0; offset < source.length; offset += size) {
+    const chunk = source.slice(offset, offset + size);
+    prefix += chunk;
+    const result = stream.append(chunk);
+    visible = result.delta === null ? result.text : visible + result.delta;
+    expect(visible).toBe(sanitizeAssistantVisibleStreamText(prefix));
+  }
+
+  expect(visible).toBe("Visible reply.");
+  expect(stream.text).toBe("Visible reply.");
+});
