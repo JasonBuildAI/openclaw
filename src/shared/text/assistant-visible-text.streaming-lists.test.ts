@@ -55,6 +55,15 @@ const documents = [
   ["candidate inside a bullet", `${fenced}\n- Use ${call.replace(/\n/g, "\n  ")}- After\n`],
   ["candidate after a list", `${fenced}\n- First step\n- Second step\n\n${call}\n`],
   ["inline span closing across items", "- Run `pnpm\n- Second step\n  command`\nAfter.\n"],
+  [
+    // A numbered marker above 1 cannot interrupt a paragraph, even inside a list item.
+    "numbered marker that cannot interrupt a paragraph",
+    `${fenced}\n- item\n  Paragraph \`open\n  4. next\n  ${call.replace(/\n/g, "\n  ")}    \` close\n`,
+  ],
+  [
+    "numbered marker after a lazy continuation",
+    `${fenced}\n- item\nparagraph \`open\n4. next\n${call}\` close\n`,
+  ],
   ["list inside a blockquote", `${fenced}\n> - First step\n> - Second step\n`],
   ["CRLF bullets", `${fenced}\r\n\r\n- First step\r\n- Second step\r\n`],
   ["bullets then a reference definition", `${fenced}\n- See [ref] here\n\n[ref]: /url\n\nAfter.\n`],

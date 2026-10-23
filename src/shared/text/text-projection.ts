@@ -158,8 +158,6 @@ function findTextCheckpoint(
   const scan = {
     // The projected window starts at a block boundary, so its first marker opens a list.
     followsBlockEnd: true,
-    // Once a top-level item is seen, later markers in the same run are block boundaries.
-    openListRun: false,
   };
   for (let end = text.indexOf("\n", cursor); end !== -1; end = text.indexOf("\n", cursor)) {
     const line = text.slice(cursor, end + 1);
@@ -169,10 +167,10 @@ function findTextCheckpoint(
     if (!inFence && !state.fenceChar && /\[|^ {0,3}=+[ \t]*\r?\n$/.test(line)) {
       return findOwnershipBoundary(text, resolveOwnership);
     }
-    const listStart =
-      !inFence &&
-      !state.fenceChar &&
-      isListBlockStart(line, scan.followsBlockEnd || scan.openListRun);
+    // A numbered marker above 1 cannot interrupt a paragraph, even inside a list item, so it
+    // only counts after a completed block. Guessing there would settle inside a paragraph
+    // whose open inline code owns later lines.
+    const listStart = !inFence && !state.fenceChar && isListBlockStart(line, scan.followsBlockEnd);
     if (ambiguous && listStart) {
       // A list item closes the ambiguous paragraph before it, so every earlier line is final.
       closedBoundary = cursor;
@@ -183,7 +181,6 @@ function findTextCheckpoint(
       return findOwnershipBoundary(text, resolveOwnership);
     }
     ambiguous ||= state.paragraphAmbiguous;
-    scan.openListRun = listStart || (scan.openListRun && !isBlankLine(line));
     scan.followsBlockEnd = listStart || isBlankLine(line);
     lastLineStart = cursor;
     cursor = end + 1;
