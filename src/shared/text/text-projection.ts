@@ -100,10 +100,11 @@ function isBlankLine(line: string): boolean {
 
 /**
  * A list item with content starts a new block: bullets interrupt the previous paragraph,
- * and an item keeps the relative indentation of its own marker. Ordered items that cannot
- * interrupt a paragraph still start a list at a block boundary.
+ * and an item keeps the relative indentation of its own marker. An ordered marker that
+ * cannot interrupt a paragraph only counts when it starts at 1, follows a completed block,
+ * or sits outside the open item's content column, where it closes that paragraph.
  */
-function isListBlockStart(line: string, followsBlockEnd: boolean): boolean {
+function findListBlockStart(line: string, followsBlockEnd: boolean, openContentIndent: number) {
   let marker = 0;
   while (marker < 3 && line[marker] === " ") {
     marker += 1;
@@ -111,6 +112,9 @@ function isListBlockStart(line: string, followsBlockEnd: boolean): boolean {
   const first = line[marker];
   let content = marker + 1;
   if (first === "-" || first === "+" || first === "*") {
+    if (isThematicBreak(line)) {
+      return undefined;
+    }
     // Bullets with content can interrupt a paragraph.
   } else if (first !== undefined && first >= "1" && first <= "9") {
     let digits = marker + 1;
@@ -119,25 +123,45 @@ function isListBlockStart(line: string, followsBlockEnd: boolean): boolean {
     }
     const delimiter = line[digits];
     if (digits - marker > 9 || (delimiter !== "." && delimiter !== ")")) {
-      return false;
+      return undefined;
     }
-    // Only a list starting at 1 interrupts a paragraph.
-    if (!followsBlockEnd && !(digits - marker === 1 && first === "1")) {
-      return false;
+    // Only a list starting at 1 interrupts a paragraph. A deeper marker keeps the
+    // containing item's paragraph open, and that paragraph can still own an inline code
+    // span that covers later lines, so only a marker outside that content column counts.
+    const interrupts = digits - marker === 1 && first === "1";
+    const closesOpenItem = openContentIndent > 0 && marker < openContentIndent;
+    if (!followsBlockEnd && !interrupts && !closesOpenItem) {
+      return undefined;
     }
     content = digits + 1;
   } else {
-    return false;
+    return undefined;
   }
   const spacer = line[content];
   if (spacer !== " " && spacer !== "\t") {
-    return false;
+    return undefined;
   }
   while (content < line.length && (line[content] === " " || line[content] === "\t")) {
     content += 1;
   }
   const head = line[content];
-  return head !== undefined && head !== "\r" && head !== "\n";
+  return head !== undefined && head !== "\r" && head !== "\n"
+    ? { markerIndent: marker, contentIndent: content }
+    : undefined;
+}
+
+/** Blocks that end a list instead of continuing the open item paragraph. */
+function startsOutsideListBlock(line: string): boolean {
+  return (
+    /^ {0,3}#{1,6}(?:[ \t]|\r?\n|$)/u.test(line) ||
+    /^ {0,3}>/u.test(line) ||
+    /^ {0,3}(?:`{3,}|~{3,})/u.test(line) ||
+    isThematicBreak(line)
+  );
+}
+
+function isThematicBreak(line: string): boolean {
+  return /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})(?:\r?\n)?$/u.test(line);
 }
 
 function isDecimalDigit(char: string | undefined): boolean {
@@ -158,6 +182,8 @@ function findTextCheckpoint(
   const scan = {
     // The projected window starts at a block boundary, so its first marker opens a list.
     followsBlockEnd: true,
+    // Content column of the list item whose paragraph is still open, or 0 outside a list.
+    openContentIndent: 0,
   };
   for (let end = text.indexOf("\n", cursor); end !== -1; end = text.indexOf("\n", cursor)) {
     const line = text.slice(cursor, end + 1);
@@ -167,10 +193,13 @@ function findTextCheckpoint(
     if (!inFence && !state.fenceChar && /\[|^ {0,3}=+[ \t]*\r?\n$/.test(line)) {
       return findOwnershipBoundary(text, resolveOwnership);
     }
-    // A numbered marker above 1 cannot interrupt a paragraph, even inside a list item, so it
-    // only counts after a completed block. Guessing there would settle inside a paragraph
-    // whose open inline code owns later lines.
-    const listStart = !inFence && !state.fenceChar && isListBlockStart(line, scan.followsBlockEnd);
+    // A deeper numbered marker cannot interrupt the paragraph of the item that contains it,
+    // whose open inline code still owns later lines, so it keeps the canonical owner.
+    const outsideBlock = startsOutsideListBlock(line);
+    const listStart =
+      !inFence && !state.fenceChar && !outsideBlock
+        ? findListBlockStart(line, scan.followsBlockEnd, scan.openContentIndent)
+        : undefined;
     if (ambiguous && listStart) {
       // A list item closes the ambiguous paragraph before it, so every earlier line is final.
       closedBoundary = cursor;
@@ -181,7 +210,14 @@ function findTextCheckpoint(
       return findOwnershipBoundary(text, resolveOwnership);
     }
     ambiguous ||= state.paragraphAmbiguous;
-    scan.followsBlockEnd = listStart || isBlankLine(line);
+    const blank = isBlankLine(line);
+    // A marker starts a new block but leaves its own item's paragraph open.
+    scan.followsBlockEnd = blank;
+    scan.openContentIndent = listStart
+      ? listStart.contentIndent
+      : blank || outsideBlock
+        ? 0
+        : scan.openContentIndent;
     lastLineStart = cursor;
     cursor = end + 1;
     closedFence = inFence && !state.fenceChar;

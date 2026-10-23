@@ -122,6 +122,24 @@ it("keeps a trace-looking line inside an open code span across a list heading", 
   expect(afterSecond.text).toContain("tool call: literal");
 });
 
+it("retains the parent paragraph before a deeper numbered marker", () => {
+  // A numbered marker indented to the bullet's content column keeps the parent paragraph
+  // open, so the code span started above it still owns the trace-looking line below.
+  const filters = [
+    ...assistantVisibleTextFilters("delivery", true),
+    ...userFacingTextFilters(false, true),
+    trimTextFilter("both", { preserveCodeIndentation: true }),
+  ];
+  const first = "tool call: hidden\n- item `open\n  2. step\n";
+  const second = "  tool call: literal\n  end`\n";
+  const stream = createTextProjection(filters);
+  const afterFirst = stream.append(first);
+  expect(afterFirst.text).toBe(applyTextFilters(first, filters));
+  const afterSecond = stream.append(second);
+  expect(afterSecond.text).toBe(applyTextFilters(first + second, filters));
+  expect(afterSecond.text).toContain("tool call: literal");
+});
+
 it("bounds checkpoint work while a bulleted list follows a code block", () => {
   const items = Array.from(
     { length: 256 },
