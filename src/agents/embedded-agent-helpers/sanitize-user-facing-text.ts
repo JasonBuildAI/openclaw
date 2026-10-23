@@ -256,25 +256,9 @@ function isWhitespaceOnly(value: string): boolean {
   return /^[ \t\r]*$/u.test(value);
 }
 
-/** The canonical grammar accepts every `\s` code point, including Unicode spaces. */
-function isCarrierWhitespace(char: string): boolean {
-  const code = char.charCodeAt(0);
-  return code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/u.test(char));
-}
-
-/** Normalize whitespace runs to one space; the caller decides how much history to retain. */
-function normalizeRuntimeContextScan(chunk: string): string {
-  let next = "";
-  for (const char of chunk) {
-    if (isCarrierWhitespace(char)) {
-      if (!next.endsWith(" ")) {
-        next += " ";
-      }
-      continue;
-    }
-    next += char.toLowerCase();
-  }
-  return next;
+/** Keep carrier words adjacent across whitespace runs, including runs split between deltas. */
+function normalizeRuntimeContextScan(text: string): string {
+  return text.replace(/\s+/gu, " ").toLowerCase();
 }
 
 /** Track whether everything published on the current line is still whitespace. */
@@ -321,11 +305,11 @@ function createRuntimeContextStreamProjector(): (input: TextProjection) => TextP
       // Every subscriber projection starts with replace(previousStream?.raw ?? ""). Only a
       // replacement that itself carried carrier bytes may latch the scrub; an empty or
       // marker-free replacement has to keep the fast path or the per-delta cost comes back.
-      const lower = input.text.toLowerCase();
       const text = stripInternalRuntimeContext(input.text, { streaming: true });
-      active = hasRuntimeContextStreamTrigger(lower) || text !== input.text;
+      const scan = normalizeRuntimeContextScan(input.text);
+      active = hasRuntimeContextStreamTrigger(scan) || text !== input.text;
       published = text;
-      scanTail = normalizeRuntimeContextScan(lower).slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
+      scanTail = scan.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
       atLineStart = isWhitespaceOnly(text.slice(text.lastIndexOf("\n") + 1));
       withheld = "";
       return { text, delta: null };
@@ -333,7 +317,7 @@ function createRuntimeContextStreamProjector(): (input: TextProjection) => TextP
     // Provider deltas have no size limit, so the trigger has to see the whole incoming chunk
     // before only the bounded overlap is retained; otherwise a coalesced private block could
     // publish its body without ever activating the scrub.
-    const scan = scanTail + normalizeRuntimeContextScan(input.delta);
+    const scan = normalizeRuntimeContextScan(scanTail + input.delta);
     scanTail = scan.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
     if (!active && hasRuntimeContextStreamTrigger(scan)) {
       active = true;
