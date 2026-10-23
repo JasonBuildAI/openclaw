@@ -232,25 +232,23 @@ describe("model special token streaming", () => {
   ])("scans a bounded prefix with %s", (_name, source, expected) => {
     expect(source.length).toBeGreaterThan(16_000);
     const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
-    const original = RegExp.prototype.test;
+    const probe = vi.spyOn(RegExp.prototype, "test");
     let tokenScanCharacters = 0;
-    const probe = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (
-      this: RegExp,
-      value,
-    ) {
-      if (this.source.startsWith("<[|｜]")) {
-        tokenScanCharacters += value.length;
-      }
-      return original.call(this, value);
-    });
     try {
       for (let offset = 0; offset < source.length; offset += 4) {
         projection.append(source.slice(offset, offset + 4));
       }
+      probe.mock.calls.forEach(([value], index) => {
+        const receiver = probe.mock.contexts[index];
+        if (receiver instanceof RegExp && receiver.source.startsWith("<[|｜]")) {
+          tokenScanCharacters += value.length;
+        }
+      });
     } finally {
       probe.mockRestore();
     }
     expect(projection.text).toBe(expected);
+    expect(tokenScanCharacters).toBeGreaterThan(0);
     expect(tokenScanCharacters).toBeLessThan(source.length * 4);
   });
 

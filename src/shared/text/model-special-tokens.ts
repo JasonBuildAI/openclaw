@@ -116,7 +116,7 @@ function projectModelSpecialTokens(text: string): ProjectedTokenText {
     } else {
       // A token body can itself contain backticks; any code overlap preserves the token.
       codeOwnershipPending ||=
-        text.lastIndexOf("`", end - 1) >= retainStart && text.indexOf("`", start) !== -1;
+        text.lastIndexOf("`", end - 1) >= retainStart && text.includes("`", start);
       if (
         // Retained text handles adjacent tokens; two code units preserve astral letters.
         // Keep alternation: Node 26.5's V8 misses astral letters in `$`-anchored `u` classes.
