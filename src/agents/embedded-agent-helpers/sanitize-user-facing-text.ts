@@ -256,12 +256,17 @@ function isWhitespaceOnly(value: string): boolean {
   return /^[ \t\r]*$/u.test(value);
 }
 
+/** The canonical grammar accepts every `\s` code point, including Unicode spaces. */
+function isCarrierWhitespace(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/u.test(char));
+}
+
 /** Normalize whitespace runs to one space; the caller decides how much history to retain. */
 function normalizeRuntimeContextScan(chunk: string): string {
   let next = "";
   for (const char of chunk) {
-    const code = char.charCodeAt(0);
-    if (code === 32 || (code >= 9 && code <= 13)) {
+    if (isCarrierWhitespace(char)) {
       if (!next.endsWith(" ")) {
         next += " ";
       }
