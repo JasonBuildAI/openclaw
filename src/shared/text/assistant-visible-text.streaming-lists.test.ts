@@ -64,6 +64,12 @@ const documents = [
     "numbered marker after a lazy continuation",
     `${fenced}\n- item\nparagraph \`open\n4. next\n${call}\` close\n`,
   ],
+  [
+    // A heading ends the list, and the ordered marker below it still cannot interrupt the
+    // paragraph whose inline code owns the following trace-looking line.
+    "heading ends the list before a numbered marker",
+    "tool call: hidden\n- item\n# heading\nParagraph `\n2. step\ntool call: literal\nend`\n",
+  ],
   ["list inside a blockquote", `${fenced}\n> - First step\n> - Second step\n`],
   ["CRLF bullets", `${fenced}\r\n\r\n- First step\r\n- Second step\r\n`],
   ["bullets then a reference definition", `${fenced}\n- See [ref] here\n\n[ref]: /url\n\nAfter.\n`],
@@ -95,6 +101,25 @@ describe.each([1, 4])("list checkpoints in %i-character deltas", (size) => {
   it.each(documents)("matches canonical output at every prefix: %s", (_name, source) => {
     expectCanonicalPrefixes(source, size);
   });
+});
+
+it("keeps a trace-looking line inside an open code span across a list heading", () => {
+  // Delivery profile: the trace filter owns `tool call:` lines, so a checkpoint that drops
+  // the opening backtick silently removes a line the canonical sanitizer keeps. The chunk
+  // boundary sits right after the numbered marker, which is where the checkpoint settles.
+  const filters = [
+    ...assistantVisibleTextFilters("delivery", true),
+    ...userFacingTextFilters(false, true),
+    trimTextFilter("both", { preserveCodeIndentation: true }),
+  ];
+  const first = "tool call: hidden\n- item\n# heading\nParagraph `\n2. step\n";
+  const second = "tool call: literal\nend`\n";
+  const stream = createTextProjection(filters);
+  const afterFirst = stream.append(first);
+  expect(afterFirst.text).toBe(applyTextFilters(first, filters));
+  const afterSecond = stream.append(second);
+  expect(afterSecond.text).toBe(applyTextFilters(first + second, filters));
+  expect(afterSecond.text).toContain("tool call: literal");
 });
 
 it("bounds checkpoint work while a bulleted list follows a code block", () => {
