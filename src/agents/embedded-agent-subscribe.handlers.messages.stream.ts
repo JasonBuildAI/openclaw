@@ -352,12 +352,24 @@ export function createStreamingReplyResolver(): StreamingReplyResolver {
     let isAppend = false;
     let replyDirectives = params.parsedStreamDirectives;
     let audioDirectiveCount = params.previousAudioDirectiveCount;
+    // The trim owner holds boundary whitespace out of preview deltas, so the raw
+    // directive text and the prepared visible delta differ only at the edges. The
+    // canonical full-reply parse trims those same edges; when the projection has
+    // already appended exactly this visible delta, that full parse cannot change
+    // anything before the next content delta or text_end.
+    const boundaryWhitespaceAppend =
+      params.appendDelta !== null &&
+      params.appendDelta === params.visibleDelta &&
+      params.previousText === params.previousCleaned &&
+      params.parsedStreamDirectives !== null &&
+      params.parsedStreamDirectives.text !== params.visibleDelta &&
+      params.parsedStreamDirectives.text.trim() === params.visibleDelta.trim();
     if (
       params.evtType !== "text_end" &&
       params.parsedStreamDirectives &&
       !hasReplyDirectiveMetadata(params.parsedStreamDirectives) &&
       !/(?:^|\n)[^\S\n]*MEDIA:\s*\S[^\n]*(?:\n|$)/i.test(params.visibleDelta) &&
-      params.parsedStreamDirectives.text === params.visibleDelta &&
+      (params.parsedStreamDirectives.text === params.visibleDelta || boundaryWhitespaceAppend) &&
       params.appendDelta !== null &&
       params.previousText === params.previousCleaned &&
       (directiveCodePrefix || !hasDirectiveMarker)
