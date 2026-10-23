@@ -152,16 +152,55 @@ function findListBlockStart(line: string, followsBlockEnd: boolean, openContentI
 
 /** Blocks that end a list instead of continuing the open item paragraph. */
 function startsOutsideListBlock(line: string): boolean {
-  return (
-    /^ {0,3}#{1,6}(?:[ \t]|\r?\n|$)/u.test(line) ||
-    /^ {0,3}>/u.test(line) ||
-    /^ {0,3}(?:`{3,}|~{3,})/u.test(line) ||
-    isThematicBreak(line)
-  );
+  let index = 0;
+  while (index < 3 && line[index] === " ") {
+    index += 1;
+  }
+  const first = line[index];
+  if (first === "#") {
+    let level = index;
+    while (level < line.length && line[level] === "#") {
+      level += 1;
+    }
+    const count = level - index;
+    if (count > 6) {
+      return false;
+    }
+    const next = line[level];
+    return next === undefined || next === " " || next === "\t" || next === "\r" || next === "\n";
+  }
+  if (first === ">") {
+    return true;
+  }
+  if (first === "`" || first === "~") {
+    let run = index;
+    while (run < line.length && line[run] === first) {
+      run += 1;
+    }
+    return run - index >= 3;
+  }
+  return isThematicBreak(line);
 }
 
 function isThematicBreak(line: string): boolean {
-  return /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})(?:\r?\n)?$/u.test(line);
+  let index = 0;
+  while (index < 3 && line[index] === " ") {
+    index += 1;
+  }
+  const marker = line[index];
+  if (marker !== "*" && marker !== "-" && marker !== "_") {
+    return false;
+  }
+  let count = 0;
+  for (let at = index; at < line.length; at += 1) {
+    const char = line[at];
+    if (char === marker) {
+      count += 1;
+    } else if (char !== " " && char !== "\t" && char !== "\r" && char !== "\n") {
+      return false;
+    }
+  }
+  return count >= 3;
 }
 
 function isDecimalDigit(char: string | undefined): boolean {
