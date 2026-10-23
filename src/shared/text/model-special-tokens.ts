@@ -56,98 +56,6 @@ function endsWithTokenBeforeIncompleteSurrogate(text: string): boolean {
   return /[\uD800-\uDBFF]$/u.test(text) && endsWithCompleteToken(text.slice(0, -1));
 }
 
-type CodeSpan = { start: number; end: number };
-
-/**
- * Code spans inside image syntax keep their ownership only until the image resolves:
- * an inline `)` completes it, and a matching reference definition can revoke it at any
- * later character. While a kept token still sits in one of those spans, appends cannot
- * be trusted and the canonical transform must re-check the ownership. This mirrors the
- * bracket walk the canonical parser uses for image-code retention.
- */
-function findRevocableImageCode(
-  text: string,
-  regions: ReadonlyArray<{ start: number; end: number; block: boolean }>,
-  keptTokens: readonly CodeSpan[],
-): boolean {
-  if (keptTokens.length === 0) {
-    return false;
-  }
-  const isRevoked = (ranges: readonly CodeSpan[]) =>
-    ranges.some((range) =>
-      keptTokens.some((token) => token.start < range.end && token.end > range.start),
-    );
-  const brackets: Array<{ image: boolean; ranges: CodeSpan[] }> = [];
-  // The `(`…`)` destination/title that follows an image label is part of the image
-  // syntax, so code spans inside it lose ownership when its closing paren completes.
-  let tail: { ranges: CodeSpan[] } | undefined;
-  let tailDepth = 0;
-  let regionIndex = 0;
-  for (let cursor = 0; cursor < text.length; cursor += 1) {
-    const region = regions[regionIndex];
-    if (region?.start === cursor) {
-      if (!region.block) {
-        const span = { start: region.start, end: region.end };
-        if (tail) {
-          tail.ranges.push(span);
-        } else {
-          for (const bracket of brackets) {
-            if (bracket.image) {
-              bracket.ranges.push(span);
-            }
-          }
-        }
-      }
-      cursor = region.end - 1;
-      regionIndex += 1;
-      continue;
-    }
-    const char = text[cursor];
-    if (tail) {
-      if (char === "\\") {
-        cursor += 1;
-      } else if (char === "(") {
-        tailDepth += 1;
-      } else if (char === ")") {
-        tailDepth -= 1;
-        if (tailDepth === 0) {
-          if (isRevoked(tail.ranges)) {
-            return true;
-          }
-          tail = undefined;
-        }
-      }
-      continue;
-    }
-    if (char === "\\") {
-      cursor += 1;
-    } else if (char === "!" && text[cursor + 1] === "[") {
-      brackets.push({ image: true, ranges: [] });
-      cursor += 1;
-    } else if (char === "[") {
-      brackets.push({ image: false, ranges: [] });
-    } else if (char === "]") {
-      const bracket = brackets.pop();
-      if (bracket?.image) {
-        if (isRevoked(bracket.ranges)) {
-          return true;
-        }
-        if (text[cursor + 1] === "(") {
-          tail = { ranges: [] };
-          tailDepth = 1;
-          cursor += 1;
-        }
-      }
-    }
-  }
-  if (tail && isRevoked(tail.ranges)) {
-    return true;
-  }
-  return brackets.some((bracket) => bracket.image && isRevoked(bracket.ranges));
-}
-
-type ReferenceDefinition = { identifier: string; start: number; end: number };
-
 /** Blank-line boundary the canonical ownership parser uses to settle reference definitions. */
 function findLastBlankLine(text: string): number {
   let lastBlank = -1;
@@ -157,184 +65,19 @@ function findLastBlankLine(text: string): number {
   return lastBlank;
 }
 
-function wrappedInBackticks(text: string, token: CodeSpan, start: number, end: number): boolean {
-  if (token.start < start || token.end > end) {
-    return false;
-  }
-  if (text.lastIndexOf("`", token.start) < start) {
-    return false;
-  }
-  const close = text.indexOf("`", token.end);
-  return close !== -1 && close < end;
-}
-
-/** `]` only closes a reference label when it is neither escaped nor inside code. */
-function findReferenceLabelClose(
-  text: string,
-  open: number,
-  regions: ReadonlyArray<{ start: number; end: number; block: boolean }>,
-): number {
-  let regionIndex = 0;
-  for (const region of regions) {
-    if (region.end > open + 1) {
-      break;
-    }
-    regionIndex += 1;
-  }
-  for (let cursor = open + 1; cursor < text.length; cursor += 1) {
-    const region = regions[regionIndex];
-    if (region?.start === cursor) {
-      cursor = region.end - 1;
-      regionIndex += 1;
-      continue;
-    }
-    if (text[cursor] !== "]") {
-      continue;
-    }
-    let backslashes = 0;
-    for (let before = cursor - 1; before >= 0 && text[before] === "\\"; before -= 1) {
-      backslashes += 1;
-    }
-    if (backslashes % 2 === 0) {
-      return cursor;
-    }
-  }
-  return -1;
-}
-
-/**
- * Visits each image-syntax range (label content, reference label, and destination/title)
- * in order. Code regions are skipped, so markup inside code is not image syntax.
- */
-function walkImageSyntax(
-  text: string,
-  regions: ReadonlyArray<{ start: number; end: number; block: boolean }>,
-  visit: (start: number, end: number) => boolean,
-): boolean {
-  const brackets: Array<{ image: boolean; start: number }> = [];
-  let tail: { start: number } | undefined;
-  let tailDepth = 0;
-  let regionIndex = 0;
-  for (let cursor = 0; cursor < text.length; cursor += 1) {
-    const region = regions[regionIndex];
-    if (region?.start === cursor) {
-      cursor = region.end - 1;
-      regionIndex += 1;
-      continue;
-    }
-    const char = text[cursor];
-    if (tail) {
-      if (char === "\\") {
-        cursor += 1;
-      } else if (char === "(") {
-        tailDepth += 1;
-      } else if (char === ")") {
-        tailDepth -= 1;
-        if (tailDepth === 0) {
-          if (visit(tail.start, cursor)) {
-            return true;
-          }
-          tail = undefined;
-        }
-      }
-      continue;
-    }
-    if (char === "\\") {
-      cursor += 1;
-    } else if (char === "!" && text[cursor + 1] === "[") {
-      brackets.push({ image: true, start: cursor + 2 });
-      cursor += 1;
-    } else if (char === "[") {
-      brackets.push({ image: false, start: cursor + 1 });
-    } else if (char === "]") {
-      const bracket = brackets.pop();
-      if (bracket?.image) {
-        const reference = text.indexOf("]", cursor + 2);
-        const end =
-          text[cursor + 1] === "[" ? (reference === -1 ? text.length - 1 : reference) : cursor;
-        if (visit(bracket.start, end + 1)) {
-          return true;
-        }
-        if (text[cursor + 1] === "(") {
-          tail = { start: cursor + 2 };
-          tailDepth = 1;
-          cursor += 1;
-        }
-      }
-    }
-  }
-  if (tail && visit(tail.start, text.length)) {
-    return true;
-  }
-  return brackets.some((bracket) => bracket.image && visit(bracket.start, text.length));
-}
-
-/**
- * Reference definitions can gain or lose their ownership while the canonical parser still
- * has no blank-line boundary after them: a same-line suffix can invalidate a definition and
- * restore, or newly strip, the tokens the batch transform keeps or removes there. Streamed
- * appends cannot be trusted until that boundary settles, in either direction.
- */
-function findUnsettledReferenceCode(
-  text: string,
-  regions: ReadonlyArray<{ start: number; end: number; block: boolean }>,
-  keptTokens: readonly CodeSpan[],
-  strippedTokens: readonly CodeSpan[],
-  definitions: readonly ReferenceDefinition[],
-  textSpans: ReadonlyArray<readonly [number, number]>,
-): boolean {
-  const lastBlank = findLastBlankLine(text);
-  const textStarts = new Set(textSpans.map(([start]) => start));
-  if (strippedTokens.length > 0) {
-    const unsettled = definitions.filter((definition) => definition.end > lastBlank);
-    for (const definition of unsettled) {
-      for (const token of strippedTokens) {
-        if (wrappedInBackticks(text, token, definition.start, definition.end)) {
-          return true;
-        }
-      }
-    }
-    if (
-      unsettled.length > 0 &&
-      walkImageSyntax(text, regions, (start, end) =>
-        strippedTokens.some((token) => wrappedInBackticks(text, token, start, end)),
-      )
-    ) {
-      return true;
-    }
-  }
-  for (const token of keptTokens) {
-    const open = text.lastIndexOf("[", token.start);
-    if (open < 0 || open <= lastBlank || text[open - 1] === "\\" || text[open - 1] === "!") {
-      continue;
-    }
-    // The block parser owns container-prefix normalization, including quotes and list items.
-    if (!textStarts.has(open)) {
-      continue;
-    }
-    const close = findReferenceLabelClose(text, open, regions);
-    if (close !== -1 && close < token.end) {
-      continue;
-    }
-    // A closed label is still undecided while the next character can still make it a
-    // definition: only `]:` strips the label tokens, and the next character may not
-    // have arrived yet.
-    if (close === -1 || close + 1 >= text.length || text[close + 1] === ":") {
-      return true;
-    }
-  }
-  return false;
-}
-
-type ProjectedTokenText = { text: string; referenceCodeRisk: boolean };
+type ProjectedTokenText = {
+  text: string;
+  codeOwnershipPending: boolean;
+  hasRetainedInlineCode: boolean;
+};
 
 function projectModelSpecialTokens(text: string): ProjectedTokenText {
   if (!text) {
-    return { text, referenceCodeRisk: false };
+    return { text, codeOwnershipPending: false, hasRetainedInlineCode: false };
   }
   MODEL_SPECIAL_TOKEN_RE.lastIndex = 0;
   if (!MODEL_SPECIAL_TOKEN_RE.test(text)) {
-    return { text, referenceCodeRisk: false };
+    return { text, codeOwnershipPending: false, hasRetainedInlineCode: false };
   }
   MODEL_SPECIAL_TOKEN_RE.lastIndex = 0;
 
@@ -342,8 +85,18 @@ function projectModelSpecialTokens(text: string): ProjectedTokenText {
     ? findCodeOwnership(text, { includeText: true })
     : undefined;
   const codeRegions = ownership?.regions ?? [];
-  const keptTokens: CodeSpan[] = [];
-  const strippedTokens: CodeSpan[] = [];
+  // Inline code can become a link destination, image label, or table cell on append.
+  // Unsettled definitions can also restore code in earlier image references.
+  const lastBlank = ownership?.definitions.length ? findLastBlankLine(text) : -1;
+  let codeOwnershipPending =
+    ownership?.definitions.some((definition) => definition.end > lastBlank) ?? false;
+  const retainStart = ownership?.retainStart ?? text.length;
+  const hasLabelCandidate = ownership?.textSpans.some(
+    ([start, end]) =>
+      end > retainStart && text.slice(Math.max(start, retainStart), end).includes("["),
+  );
+  const hasLineBreak = /[\r\n]/.test(text.slice(retainStart));
+  let hasRetainedInlineCode = false;
   let out = "";
   let cursor = 0;
   for (const match of text.matchAll(MODEL_SPECIAL_TOKEN_RE)) {
@@ -351,11 +104,19 @@ function projectModelSpecialTokens(text: string): ProjectedTokenText {
     const start = match.index ?? 0;
     const end = start + matched.length;
     out += text.slice(cursor, start);
-    if (codeRegions.some((region) => start < region.end && end > region.start)) {
+    const code = codeRegions.find((region) => start < region.end && end > region.start);
+    if (code) {
       out += matched;
-      keptTokens.push({ start, end });
+      if (!code.block && code.end > retainStart) {
+        hasRetainedInlineCode = true;
+        // Parser-owned bracket text can still consume code as link/image/reference syntax.
+        // Otherwise, a plain code-bearing line can only become a table at a line boundary.
+        codeOwnershipPending ||= hasLabelCandidate || hasLineBreak;
+      }
     } else {
-      strippedTokens.push({ start, end });
+      // A token body can itself contain backticks; any code overlap preserves the token.
+      codeOwnershipPending ||=
+        text.lastIndexOf("`", end - 1) >= retainStart && text.indexOf("`", start) !== -1;
       if (
         // Retained text handles adjacent tokens; two code units preserve astral letters.
         // Keep alternation: Node 26.5's V8 misses astral letters in `$`-anchored `u` classes.
@@ -369,18 +130,7 @@ function projectModelSpecialTokens(text: string): ProjectedTokenText {
     cursor = end;
   }
   out += text.slice(cursor);
-  const referenceCodeRisk =
-    ownership !== undefined &&
-    (findRevocableImageCode(text, codeRegions, keptTokens) ||
-      findUnsettledReferenceCode(
-        text,
-        codeRegions,
-        keptTokens,
-        strippedTokens,
-        ownership.definitions,
-        ownership.textSpans,
-      ));
-  return { text: out, referenceCodeRisk };
+  return { text: out, codeOwnershipPending, hasRetainedInlineCode };
 }
 
 /**
@@ -398,8 +148,7 @@ export function stripModelSpecialTokens(text: string): string {
  * token has appeared, deltas that cannot start or complete one append directly; the
  * canonical transform only runs for an unstable tail, a token-ending separator, a backtick
  * delta, a fence-capable tilde run that can change whether an earlier token is code-owned,
- * while a kept token still depends on image syntax that a later character can resolve,
- * or while a reference definition can still gain or lose the ownership of a token.
+ * or Markdown ownership is unsettled according to the canonical parser.
  */
 export function createModelSpecialTokenProjector(): (input: TextProjection) => TextProjection {
   let inputLength = 0;
@@ -411,14 +160,16 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
   let separatorPending = false;
   // Only a 3+ tilde run can open or close a fence, so a split run carries two characters.
   let tildeCarry = "";
-  // Image syntax or an unsettled reference definition can still change token ownership.
-  let referenceCodeRisk = false;
+  // The canonical parser owns all pending Markdown corrections.
+  let codeOwnershipPending = false;
+  let hasRetainedInlineCode = false;
 
   const projectFull = (text: string, delta: string | null): TextProjection => {
     inputLength = text.length;
     const projected = projectModelSpecialTokens(text);
     const next = projected.text;
-    referenceCodeRisk = projected.referenceCodeRisk;
+    codeOwnershipPending = projected.codeOwnershipPending;
+    hasRetainedInlineCode = projected.hasRetainedInlineCode;
     const nextDelta =
       delta === null ? null : next.startsWith(output) ? next.slice(output.length) : null;
     output = next;
@@ -457,11 +208,12 @@ export function createModelSpecialTokenProjector(): (input: TextProjection) => T
     const changesCodeOwnership =
       appended.includes("`") || appended.includes("~~~") || (tildeCarry + appended).includes("~~~");
     if (
-      referenceCodeRisk ||
+      codeOwnershipPending ||
       pendingPrefix ||
       separatorPending ||
       TOKEN_START_RE.test(appended) ||
-      changesCodeOwnership
+      changesCodeOwnership ||
+      (hasRetainedInlineCode && /[\r\n]/.test(appended))
     ) {
       return projectFull(input.text, appended);
     }

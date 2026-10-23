@@ -97,6 +97,46 @@ const sources: Array<[string, string]> = [
 ];
 
 describe("model special token streaming", () => {
+  it.each([
+    ["escaped opener", "[a \\[ `<|assistant|>`]: /url", "[a \\[ ``]: /url"],
+    ["link destination", "[a](`<|assistant|>`)", "[a](``)"],
+    ["link title", '[a](/url "ti `<|assistant|>`tle")', '[a](/url "ti ``tle")'],
+    ["table recognition", "`<|assistant|>`\n---|---|---", "``\n---|---|---"],
+    ["table invalidation", "`<|assistant|>`\n---|---|---x", "`<|assistant|>`\n---|---|---x"],
+    [
+      "secondary image reference",
+      "[`<|assistant|>`]: /url\n\n![a][`<|assistant|>`]",
+      "[``]: /url\n\n![a][``]",
+    ],
+    ["code inside a token body", "[a <|`x`|>]: /url x", "[a <|`x`|>]: /url x"],
+  ])("keeps prefix and delta parity across every split of %s", (_name, source, expected) => {
+    expect(stripModelSpecialTokens(source)).toBe(expected);
+    const check = (chunks: string[]) => {
+      const projection = createTextProjection([modelSpecialTokensTextFilter]);
+      let prefix = "";
+      let delivered = "";
+      for (const chunk of chunks) {
+        prefix += chunk;
+        const result = projection.append(chunk);
+        delivered = result.delta === null ? result.text : delivered + result.delta;
+        const batch = stripModelSpecialTokens(prefix);
+        expect(result.text, JSON.stringify(chunks)).toBe(batch);
+        expect(delivered, JSON.stringify(chunks)).toBe(batch);
+      }
+      expect(delivered).toBe(expected);
+    };
+    for (let split = 1; split < source.length; split++) {
+      check([source.slice(0, split), source.slice(split)]);
+    }
+    for (const size of [1, 4]) {
+      check(
+        Array.from({ length: Math.ceil(source.length / size) }, (_, index) =>
+          source.slice(index * size, (index + 1) * size),
+        ),
+      );
+    }
+  });
+
   it.each(sources)("matches the batch transform for %s", (name, source) => {
     const batch = stripModelSpecialTokens(source);
     for (const chunkSize of chunkSizes) {
@@ -174,83 +214,43 @@ describe("model special token streaming", () => {
       expect(projection.text, `completed image at ${chunkSize} chars`).toBe(batch);
     }
   });
-  it("scans a bounded prefix with tilde-dense prose", () => {
-    const source = `<|assistant|>${"Latency is about ~12 ms at ~50% load. ".repeat(500).trimEnd()}`;
+  const answer = Array.from(
+    { length: 400 },
+    (_value, index) => `Step ${index}: ordinary prose about the release.`,
+  ).join("\n");
+  const tildeAnswer = "Latency is about ~12 ms at ~50% load. ".repeat(500).trimEnd();
+  const quotedAnswer = "Use `<|assistant|>` literally. " + answer.replaceAll("\n", " ");
+  it.each([
+    ["ordinary prose", `<|assistant|>${answer}`, answer],
+    [
+      "a lone backtick",
+      `<|assistant|>${answer.slice(0, 8_000)} a lone \` tick ${answer.slice(8_000)}`,
+      `${answer.slice(0, 8_000)} a lone \` tick ${answer.slice(8_000)}`,
+    ],
+    ["tilde-dense prose", `<|assistant|>${tildeAnswer}`, tildeAnswer],
+    ["a quoted token", quotedAnswer, quotedAnswer],
+  ])("scans a bounded prefix with %s", (_name, source, expected) => {
     expect(source.length).toBeGreaterThan(16_000);
     const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
-    const probe = vi.spyOn(RegExp.prototype, "test");
+    const original = RegExp.prototype.test;
     let tokenScanCharacters = 0;
+    const probe = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (
+      this: RegExp,
+      value,
+    ) {
+      if (this.source.startsWith("<[|｜]")) {
+        tokenScanCharacters += value.length;
+      }
+      return original.call(this, value);
+    });
     try {
       for (let offset = 0; offset < source.length; offset += 4) {
         projection.append(source.slice(offset, offset + 4));
       }
-      probe.mock.calls.forEach(([value], index) => {
-        const regex = probe.mock.instances[index] as RegExp | undefined;
-        if (regex?.source.startsWith("<[|｜]")) {
-          tokenScanCharacters += value.length;
-        }
-      });
     } finally {
       probe.mockRestore();
     }
-    expect(projection.text).toBe(source.slice("<|assistant|>".length));
-    // A single "~" cannot change code ownership, so only the token delta may re-scan.
-    expect(tokenScanCharacters).toBeLessThan(source.length * 4);
-  });
-
-  it("scans a bounded prefix after a leaked token and a lone backtick", () => {
-    const answer = Array.from(
-      { length: 400 },
-      (_value, index) => `Step ${index}: ordinary prose about the release.`,
-    ).join("\n");
-    const source = `<|assistant|>${answer.slice(0, 8_000)} a lone \` tick ${answer.slice(8_000)}`;
-    expect(source.length).toBeGreaterThan(16_000);
-    const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
-    const probe = vi.spyOn(RegExp.prototype, "test");
-    let tokenScanCharacters = 0;
-    try {
-      for (let offset = 0; offset < source.length; offset += 4) {
-        projection.append(source.slice(offset, offset + 4));
-      }
-      probe.mock.calls.forEach(([value], index) => {
-        const regex = probe.mock.instances[index] as RegExp | undefined;
-        if (regex?.source.startsWith("<[|｜]")) {
-          tokenScanCharacters += value.length;
-        }
-      });
-    } finally {
-      probe.mockRestore();
-    }
-    expect(projection.text).toBe(source.slice("<|assistant|>".length));
-    // Only the token and the backtick delta may re-run the canonical token scan.
-    expect(tokenScanCharacters).toBeLessThan(source.length * 4);
-  });
-
-  it("scans a bounded prefix after a leaked token", () => {
-    const answer = Array.from(
-      { length: 400 },
-      (_value, index) => `Step ${index}: ordinary prose about the release.`,
-    ).join("\n");
-    const source = `<|assistant|>${answer}`;
-    expect(source.length).toBeGreaterThan(16_000);
-    const projection = createTextProjection(assistantVisibleTextFilters("delivery", true));
-    const probe = vi.spyOn(RegExp.prototype, "test");
-    let tokenScanCharacters = 0;
-    try {
-      for (let offset = 0; offset < source.length; offset += 4) {
-        projection.append(source.slice(offset, offset + 4));
-      }
-      probe.mock.calls.forEach(([value], index) => {
-        const regex = probe.mock.instances[index] as RegExp | undefined;
-        if (regex?.source.startsWith("<[|｜]")) {
-          tokenScanCharacters += value.length;
-        }
-      });
-    } finally {
-      probe.mockRestore();
-    }
-    expect(projection.text).toBe(answer);
-    // The canonical scan may run for the token's deltas, never for every later delta.
+    expect(projection.text).toBe(expected);
     expect(tokenScanCharacters).toBeLessThan(source.length * 4);
   });
 
