@@ -239,19 +239,29 @@ const RUNTIME_CONTEXT_STREAM_DELIMITERS = [
   INTERNAL_RUNTIME_CONTEXT_END,
   RUNTIME_CONTEXT_HEADER,
 ] as const;
-// Prefaces, the undelimited internal header, and the notice are stripped as part of the same
-// block; the notice is the only complete trigger for a reflowed carrier without delimiters.
-const RUNTIME_CONTEXT_STREAM_ACTIVATIONS = [
-  ...RUNTIME_CONTEXT_STREAM_DELIMITERS,
-  OPENCLAW_RUNTIME_CONTEXT_NOTICE,
-  "OpenClaw runtime context for the",
-  "OpenClaw runtime event.",
-  "OpenClaw runtime context (internal):",
-].map((token) => token.toLowerCase());
-const RUNTIME_CONTEXT_STREAM_ACTIVATION_OVERLAP =
-  Math.max(...RUNTIME_CONTEXT_STREAM_ACTIVATIONS.map((token) => token.length)) - 1;
+const RUNTIME_CONTEXT_STREAM_DELIMITERS_LOWER = RUNTIME_CONTEXT_STREAM_DELIMITERS.map((token) =>
+  token.toLowerCase(),
+);
+// The canonical carrier grammar accepts any whitespace between words, so a reflowed preface or
+// notice still has to activate. The scan window below bounds this probe; the final sanitizer
+// keeps ownership of arbitrarily wide whitespace.
+const RUNTIME_CONTEXT_STREAM_CARRIER =
+  /openclaw\s+runtime\s+(?:context|event)\b|this\s+context\s+is\s+runtime-generated\b/u;
+const RUNTIME_CONTEXT_STREAM_SCAN_LENGTH = 256;
 
 type StreamProjection = { text: string; delta: string | null };
+
+function hasRuntimeContextStreamTrigger(lowerText: string): boolean {
+  if (RUNTIME_CONTEXT_STREAM_DELIMITERS_LOWER.some((token) => lowerText.includes(token))) {
+    return true;
+  }
+  // Generated carrier words are never split internally, so the literal probes keep the
+  // whitespace-tolerant regex off ordinary prose.
+  return (
+    (lowerText.includes("openclaw") || lowerText.includes("runtime-generated")) &&
+    RUNTIME_CONTEXT_STREAM_CARRIER.test(lowerText)
+  );
+}
 
 function isPartialRuntimeContextDelimiter(line: string): boolean {
   const tail = line.trim();
@@ -271,9 +281,14 @@ function createRuntimeContextStreamProjector(): (input: StreamProjection) => Str
   let scanTail = "";
   return (input) => {
     if (input.delta === null) {
+      // Every subscriber projection starts with replace(previousStream?.raw ?? ""). Only a
+      // replacement that itself carried carrier bytes may latch the scrub; an empty or
+      // marker-free replacement has to keep the fast path or the per-delta cost comes back.
+      const lower = input.text.toLowerCase();
       const text = stripInternalRuntimeContext(input.text, { streaming: true });
-      active = true;
+      active = hasRuntimeContextStreamTrigger(lower) || text !== input.text;
       published = text;
+      scanTail = lower.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
       atLineStart = text.length === 0 || text.endsWith("\n");
       withheld = "";
       return { text, delta: null };
@@ -281,8 +296,8 @@ function createRuntimeContextStreamProjector(): (input: StreamProjection) => Str
     // Only the newest delta can complete a generated token; the bounded tail keeps a token
     // that spans deltas visible without rescanning the reply.
     const scan = (scanTail + input.delta).toLowerCase();
-    scanTail = scan.slice(-RUNTIME_CONTEXT_STREAM_ACTIVATION_OVERLAP);
-    if (!active && RUNTIME_CONTEXT_STREAM_ACTIVATIONS.some((token) => scan.includes(token))) {
+    scanTail = scan.slice(-RUNTIME_CONTEXT_STREAM_SCAN_LENGTH);
+    if (!active && hasRuntimeContextStreamTrigger(scan)) {
       active = true;
     }
     if (active) {
