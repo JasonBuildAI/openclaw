@@ -232,6 +232,99 @@ export function createVerifiedConversationContextStreamFilter(
   };
 }
 
+// Line-delimited tokens that can begin a removable runtime-context block. Every one is a
+// complete generated delimiter, so ordinary prose ("o", "<", "This context") never activates.
+const RUNTIME_CONTEXT_STREAM_DELIMITERS = [
+  INTERNAL_RUNTIME_CONTEXT_BEGIN,
+  INTERNAL_RUNTIME_CONTEXT_END,
+  RUNTIME_CONTEXT_HEADER,
+] as const;
+// Prefaces, the undelimited internal header, and the notice are stripped as part of the same
+// block; the notice is the only complete trigger for a reflowed carrier without delimiters.
+const RUNTIME_CONTEXT_STREAM_ACTIVATIONS = [
+  ...RUNTIME_CONTEXT_STREAM_DELIMITERS,
+  OPENCLAW_RUNTIME_CONTEXT_NOTICE,
+  "OpenClaw runtime context for the",
+  "OpenClaw runtime event.",
+  "OpenClaw runtime context (internal):",
+].map((token) => token.toLowerCase());
+const RUNTIME_CONTEXT_STREAM_ACTIVATION_OVERLAP =
+  Math.max(...RUNTIME_CONTEXT_STREAM_ACTIVATIONS.map((token) => token.length)) - 1;
+
+type StreamProjection = { text: string; delta: string | null };
+
+function isPartialRuntimeContextDelimiter(line: string): boolean {
+  const tail = line.trim();
+  return (
+    tail.length > 0 &&
+    RUNTIME_CONTEXT_STREAM_DELIMITERS.some(
+      (delimiter) => tail.length < delimiter.length && delimiter.startsWith(tail),
+    )
+  );
+}
+
+function createRuntimeContextStreamProjector(): (input: StreamProjection) => StreamProjection {
+  let active = false;
+  let published = "";
+  let atLineStart = true;
+  let withheld = "";
+  let scanTail = "";
+  return (input) => {
+    if (input.delta === null) {
+      const text = stripInternalRuntimeContext(input.text, { streaming: true });
+      active = true;
+      published = text;
+      atLineStart = text.length === 0 || text.endsWith("\n");
+      withheld = "";
+      return { text, delta: null };
+    }
+    // Only the newest delta can complete a generated token; the bounded tail keeps a token
+    // that spans deltas visible without rescanning the reply.
+    const scan = (scanTail + input.delta).toLowerCase();
+    scanTail = scan.slice(-RUNTIME_CONTEXT_STREAM_ACTIVATION_OVERLAP);
+    if (!active && RUNTIME_CONTEXT_STREAM_ACTIVATIONS.some((token) => scan.includes(token))) {
+      active = true;
+    }
+    if (active) {
+      // A complete delimiter owns the rest of the reply: the canonical streaming scrub
+      // latches so the context body can never follow it into the preview.
+      const text = stripInternalRuntimeContext(input.text, { streaming: true });
+      const delta = text.startsWith(published) ? text.slice(published.length) : null;
+      published = text;
+      atLineStart = text.length === 0 || text.endsWith("\n");
+      withheld = "";
+      return text === input.text && delta === input.delta ? input : { text, delta };
+    }
+    // A delimiter is removable only as a whole line, so a hold can start only where a
+    // line starts - never from an ordinary line that already failed the prefix test.
+    const complete = withheld + input.delta;
+    const lastNewline = complete.lastIndexOf("\n");
+    const candidate =
+      lastNewline >= 0
+        ? complete.slice(lastNewline + 1)
+        : withheld || atLineStart
+          ? complete
+          : undefined;
+    if (candidate !== undefined && isPartialRuntimeContextDelimiter(candidate)) {
+      const prefix = complete.slice(0, complete.length - candidate.length);
+      withheld = candidate;
+      published = prefix ? published + prefix : published;
+      return { text: published, delta: prefix };
+    }
+    if (withheld) {
+      withheld = "";
+      published = input.text;
+      atLineStart = complete.endsWith("\n");
+      return { text: input.text, delta: complete };
+    }
+    published = input.text;
+    if (input.delta !== "") {
+      atLineStart = input.delta.endsWith("\n");
+    }
+    return input;
+  };
+}
+
 // Share descriptors only; createTextProjection owns each stream's mutable state.
 const userFacingFilters: Partial<
   Record<`${"normal" | "error"}${"" | "-stream"}`, readonly TextFilter[]>
@@ -247,18 +340,20 @@ export function userFacingTextFilters(
       transform: stripFinalTags,
       create: () => createConditionalTextProjector(stripFinalTags, createFinalTagProbe()),
     },
-    {
-      transform: streaming
-        ? (text) => stripInternalRuntimeContext(text, { streaming: true })
-        : stripInternalRuntimeContext,
-      activationTokens: [
-        streaming ? "<" : INTERNAL_RUNTIME_CONTEXT_BEGIN,
-        INTERNAL_RUNTIME_CONTEXT_END,
-        OPENCLAW_RUNTIME_CONTEXT_NOTICE,
-        // Activate before any ambiguous carrier prefix can reach a user-visible stream.
-        streaming ? RUNTIME_CONTEXT_HEADER.charAt(0) : RUNTIME_CONTEXT_HEADER,
-      ],
-    },
+    streaming
+      ? {
+          transform: (text) => stripInternalRuntimeContext(text, { streaming: true }),
+          create: createRuntimeContextStreamProjector,
+        }
+      : {
+          transform: stripInternalRuntimeContext,
+          activationTokens: [
+            INTERNAL_RUNTIME_CONTEXT_BEGIN,
+            INTERNAL_RUNTIME_CONTEXT_END,
+            OPENCLAW_RUNTIME_CONTEXT_NOTICE,
+            RUNTIME_CONTEXT_HEADER,
+          ],
+        },
     { transform: stripInboundMetadata, activationTokens: INBOUND_METADATA_MARKERS },
     minimaxToolCallTextFilter,
     toolCallXmlTextFilter({ stripFunctionCallsXmlPayloads: true }),
