@@ -10,11 +10,8 @@ import {
   CODEX_APP_SERVER_THREADS_LIST_COMMAND,
   CODEX_APP_SERVER_THREAD_TURNS_LIST_COMMAND,
   CODEX_NODE_CONTINUE_COMMANDS,
-  createCodexTestBindingStore,
-  createControl,
-  createGatewayApi,
+  createCatalogTestProvider,
   createRuntime,
-  registerCodexSessionCatalog,
   transcriptMirrorMocks,
   type OpenClawConfig,
   type PluginRuntime,
@@ -89,25 +86,19 @@ function createHomeFixture(options: HomeWire = {}, entries: EntrySummary[] = [])
     ],
     invoke,
   });
+  const findEntry = (sessionKey: string) =>
+    runtimeFixture.entries.find((candidate) => candidate.sessionKey === sessionKey)?.entry;
   vi.spyOn(runtimeFixture.runtime.agent.session, "getSessionEntryAsync").mockImplementation(
-    async ({ sessionKey }) =>
-      runtimeFixture.entries.find((candidate) => candidate.sessionKey === sessionKey)?.entry,
+    async ({ sessionKey }) => findEntry(sessionKey),
   );
   const config: OpenClawConfig = { agents: { ownership: "explicit", entries: { main: {} } } };
-  const { api, getProvider } = createGatewayApi(runtimeFixture.runtime, config);
-  registerCodexSessionCatalog({
-    api,
-    bindingStore: createCodexTestBindingStore(),
-    control: createControl(),
+  const provider = createCatalogTestProvider({
+    runtime: runtimeFixture.runtime,
+    startupConfig: config,
     getRuntimeConfig: () => config,
   });
-  const provider = getProvider();
-  const continueSession = provider?.continueSession;
-  if (!provider || !continueSession) {
-    throw new Error("Codex continuation provider did not register");
-  }
   const continueAt = (sourceHomeId?: string) =>
-    continueSession({
+    provider.continueSession!({
       hostId,
       threadId,
       ...(sourceHomeId ? { sourceHomeId } : {}),
@@ -115,7 +106,6 @@ function createHomeFixture(options: HomeWire = {}, entries: EntrySummary[] = [])
     });
   return {
     ...runtimeFixture,
-    invoke,
     provider,
     wire,
     continueAt,
@@ -129,13 +119,11 @@ function createHomeFixture(options: HomeWire = {}, entries: EntrySummary[] = [])
       expect(importHistory).not.toHaveBeenCalled();
     },
     entry: (sessionKey: string) => {
-      const summary = runtimeFixture.entries.find(
-        (candidate) => candidate.sessionKey === sessionKey,
-      );
-      if (!summary) {
+      const entry = findEntry(sessionKey);
+      if (!entry) {
         throw new Error("missing adopted session entry");
       }
-      return summary.entry;
+      return entry;
     },
   };
 }
