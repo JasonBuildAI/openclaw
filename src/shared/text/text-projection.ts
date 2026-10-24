@@ -53,210 +53,48 @@ export function createConditionalTextProjector(
   };
 }
 
-type TextCheckpointBoundary = {
-  offset: number;
-  context: string;
-  definitions?: ReturnType<typeof findCodeOwnership>["definitions"];
-};
-
-/** Canonical fallback: the last block start that still owns unresolved Markdown context. */
-function findOwnershipBoundary(
-  text: string,
-  resolveOwnership: (text: string) => ReturnType<typeof findCodeOwnership>,
-): TextCheckpointBoundary {
-  const ownership = resolveOwnership(text);
-  // Normalization can expand a label beyond CommonMark's 999-character source limit.
-  // Such definitions stay in source instead of being serialized as carried context.
-  const retain = ownership.definitions.reduce(
-    (offset, { identifier, start }) => (identifier.length > 999 ? Math.min(offset, start) : offset),
-    ownership.retainStart,
-  );
-  const start = retain === 0 ? 0 : text.lastIndexOf("\n", retain - 1) + 1;
-  const completeEnd = text.lastIndexOf("\n") + 1;
-  if (
-    !/\r(?!\n)/.test(text) &&
-    ownership.regions.some((region) => region.block && region.start === retain)
-  ) {
-    const fence = scanFenceSpans(text.slice(start, completeEnd)).state.open;
-    if (fence) {
-      return {
-        offset: completeEnd,
-        context: fence.marker + "\n",
-        definitions: ownership.definitions,
-      };
-    }
-  }
-  return { offset: start, context: "", definitions: ownership.definitions };
-}
-
-function isBlankLine(line: string): boolean {
-  for (const char of line) {
-    if (char !== " " && char !== "\t" && char !== "\r" && char !== "\n") {
-      return false;
-    }
-  }
-  return true;
-}
-
-/**
- * A list item with content starts a new block: bullets interrupt the previous paragraph,
- * and an item keeps the relative indentation of its own marker. An ordered marker that
- * cannot interrupt a paragraph only counts when it starts at 1, follows a completed block,
- * or sits outside the open item's content column, where it closes that paragraph.
- */
-function findListBlockStart(line: string, followsBlockEnd: boolean, openContentIndent: number) {
-  let marker = 0;
-  while (marker < 3 && line[marker] === " ") {
-    marker += 1;
-  }
-  const first = line[marker];
-  let content = marker + 1;
-  if (first === "-" || first === "+" || first === "*") {
-    if (isThematicBreak(line)) {
-      return undefined;
-    }
-    // Bullets with content can interrupt a paragraph.
-  } else if (first !== undefined && first >= "1" && first <= "9") {
-    let digits = marker + 1;
-    while (digits - marker <= 9 && isDecimalDigit(line[digits])) {
-      digits += 1;
-    }
-    const delimiter = line[digits];
-    if (digits - marker > 9 || (delimiter !== "." && delimiter !== ")")) {
-      return undefined;
-    }
-    // Only a list starting at 1 interrupts a paragraph. A deeper marker keeps the
-    // containing item's paragraph open, and that paragraph can still own an inline code
-    // span that covers later lines, so only a marker outside that content column counts.
-    const interrupts = digits - marker === 1 && first === "1";
-    const closesOpenItem = openContentIndent > 0 && marker < openContentIndent;
-    if (!followsBlockEnd && !interrupts && !closesOpenItem) {
-      return undefined;
-    }
-    content = digits + 1;
-  } else {
-    return undefined;
-  }
-  const spacer = line[content];
-  if (spacer !== " " && spacer !== "\t") {
-    return undefined;
-  }
-  while (content < line.length && (line[content] === " " || line[content] === "\t")) {
-    content += 1;
-  }
-  const head = line[content];
-  return head !== undefined && head !== "\r" && head !== "\n"
-    ? { markerIndent: marker, contentIndent: content }
-    : undefined;
-}
-
-/** Blocks that end a list instead of continuing the open item paragraph. */
-function startsOutsideListBlock(line: string): boolean {
-  let index = 0;
-  while (index < 3 && line[index] === " ") {
-    index += 1;
-  }
-  const first = line[index];
-  if (first === "#") {
-    let level = index;
-    while (level < line.length && line[level] === "#") {
-      level += 1;
-    }
-    const count = level - index;
-    if (count > 6) {
-      return false;
-    }
-    const next = line[level];
-    return next === undefined || next === " " || next === "\t" || next === "\r" || next === "\n";
-  }
-  if (first === ">") {
-    return true;
-  }
-  if (first === "`" || first === "~") {
-    let run = index;
-    while (run < line.length && line[run] === first) {
-      run += 1;
-    }
-    return run - index >= 3;
-  }
-  return isThematicBreak(line);
-}
-
-function isThematicBreak(line: string): boolean {
-  let index = 0;
-  while (index < 3 && line[index] === " ") {
-    index += 1;
-  }
-  const marker = line[index];
-  if (marker !== "*" && marker !== "-" && marker !== "_") {
-    return false;
-  }
-  let count = 0;
-  for (let at = index; at < line.length; at += 1) {
-    const char = line[at];
-    if (char === marker) {
-      count += 1;
-    } else if (char !== " " && char !== "\t" && char !== "\r" && char !== "\n") {
-      return false;
-    }
-  }
-  return count >= 3;
-}
-
-function isDecimalDigit(char: string | undefined): boolean {
-  return char !== undefined && char >= "0" && char <= "9";
-}
-
 function findTextCheckpoint(
   text: string,
   referenceLength: number,
   resolveOwnership: (text: string) => ReturnType<typeof findCodeOwnership>,
-): TextCheckpointBoundary {
+): {
+  offset: number;
+  context: string;
+  definitions?: ReturnType<typeof findCodeOwnership>["definitions"];
+} {
   const state = createProtectionScanState();
   let cursor = referenceLength;
   let lastLineStart = cursor;
   let closedFence = false;
-  let ambiguous = false;
-  let closedBoundary = -1;
-  const scan = {
-    // The projected window starts at a block boundary, so its first marker opens a list.
-    followsBlockEnd: true,
-    // Content column of the list item whose paragraph is still open, or 0 outside a list.
-    openContentIndent: 0,
-  };
   for (let end = text.indexOf("\n", cursor); end !== -1; end = text.indexOf("\n", cursor)) {
     const line = text.slice(cursor, end + 1);
     const inFence = Boolean(state.fenceChar);
     advanceProtectionScanState(state, line);
     // References, image descriptions, and setext headings can need earlier paragraph context.
-    if (!inFence && !state.fenceChar && /\[|^ {0,3}=+[ \t]*\r?\n$/.test(line)) {
-      return findOwnershipBoundary(text, resolveOwnership);
+    if (
+      state.paragraphAmbiguous ||
+      state.structuralUnknown ||
+      (!inFence && !state.fenceChar && /\[|^ {0,3}=+[ \t]*\r?\n$/.test(line))
+    ) {
+      const ownership = resolveOwnership(text);
+      const retain = ownership.retainStart;
+      const start = retain === 0 ? 0 : text.lastIndexOf("\n", retain - 1) + 1;
+      const completeEnd = text.lastIndexOf("\n") + 1;
+      if (
+        !/\r(?!\n)/.test(text) &&
+        ownership.regions.some((region) => region.block && region.start === retain)
+      ) {
+        const fence = scanFenceSpans(text.slice(start, completeEnd)).state.open;
+        if (fence) {
+          return {
+            offset: completeEnd,
+            context: fence.marker + "\n",
+            definitions: ownership.definitions,
+          };
+        }
+      }
+      return { offset: start, context: "", definitions: ownership.definitions };
     }
-    // A deeper numbered marker cannot interrupt the paragraph of the item that contains it,
-    // whose open inline code still owns later lines, so it keeps the canonical owner.
-    const outsideBlock = startsOutsideListBlock(line);
-    const listStart =
-      !inFence && !state.fenceChar && !outsideBlock
-        ? findListBlockStart(line, scan.followsBlockEnd, scan.openContentIndent)
-        : undefined;
-    if (ambiguous && listStart) {
-      // A list item closes the ambiguous paragraph before it, so every earlier line is final.
-      closedBoundary = cursor;
-      ambiguous = false;
-    }
-    if (state.structuralUnknown) {
-      // Unclassified delimiters leave fence parity unknown; every line needs the full parse.
-      return findOwnershipBoundary(text, resolveOwnership);
-    }
-    ambiguous ||= state.paragraphAmbiguous;
-    const blank = isBlankLine(line);
-    // A marker starts a new block but leaves its own item's paragraph open.
-    scan.followsBlockEnd = blank;
-    scan.openContentIndent = listStart
-      ? listStart.contentIndent
-      : blank || outsideBlock
-        ? 0
-        : scan.openContentIndent;
     lastLineStart = cursor;
     cursor = end + 1;
     closedFence = inFence && !state.fenceChar;
@@ -264,12 +102,6 @@ function findTextCheckpoint(
   if (state.fenceChar) {
     // Only the proven top-level fence is carried; its settled body is never parsed again.
     return { offset: cursor, context: state.fenceChar.repeat(state.fenceLength) + "\n" };
-  }
-  if (ambiguous) {
-    // Without a closed list item, the ambiguous block keeps the canonical owner.
-    return closedBoundary > referenceLength
-      ? { offset: closedBoundary, context: "" }
-      : findOwnershipBoundary(text, resolveOwnership);
   }
   return { offset: closedFence ? cursor : lastLineStart, context: "" };
 }
@@ -288,7 +120,12 @@ function createCheckpointTransform(
   let ownershipSource = "";
   let ownership: ReturnType<typeof findCodeOwnership> | undefined;
   const resolveOwnership = (text: string) => {
-    if (ownership && canReuseMarkdownOwnership(ownershipSource, text, ownership)) {
+    // Code ranges can stay unchanged while a completed list item advances settlement.
+    if (
+      ownership &&
+      !text.includes("\n", ownershipSource.length) &&
+      canReuseMarkdownOwnership(ownershipSource, text, ownership)
+    ) {
       ownershipSource = text;
       return ownership;
     }
