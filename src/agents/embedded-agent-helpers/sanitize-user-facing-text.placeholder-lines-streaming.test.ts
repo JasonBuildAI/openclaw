@@ -115,6 +115,13 @@ it.each([1, 3, 7])(
         "single blockquote transcript",
         "> $ npm run build\n> (no output)\n> A quoted explanation follows.\n",
       ],
+      [
+        // A CommonMark lazy continuation has no "> " prefix, so the predicate does accept it.
+        "blockquote lazy continuation",
+        "> $ npm run build\n(no output)\n> A quoted explanation follows.\n",
+      ],
+      ["indented block mid-reply", "Intro.\n\n    (no output)\n    step\n\nOutro."],
+      ["crlf tool-calls line", "Earlier steps.\r\n[tool calls omitted]\r\n\r\nDone."],
     ] as const;
     for (const [label, source] of shapes) {
       expectCanonicalStream(source, size, label);
