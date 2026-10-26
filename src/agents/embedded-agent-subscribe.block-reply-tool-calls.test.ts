@@ -56,6 +56,7 @@ describe("block reply plain-text tool calls", () => {
       streamReply({ doc, chunk, emit });
       await subscription.waitForPendingEvents();
       expect(leaked(blocks), `chunk=${chunk} blocks=${JSON.stringify(blocks)}`).toBe(false);
+      expect(blocks.join("").trim()).toBe("");
     }
   });
 
@@ -76,6 +77,7 @@ describe("block reply plain-text tool calls", () => {
     });
     await subscription.waitForPendingEvents();
     expect(leaked(blocks)).toBe(false);
+    expect(blocks.join("")).toContain("Intro paragraph stays visible.");
     expect(blocks.join("")).toContain("Done after the calls.");
   });
 
@@ -118,5 +120,63 @@ describe("block reply plain-text tool calls", () => {
     expect(blocks.length).toBeGreaterThan(1);
     // Chunk boundaries may trim the separating space, so compare normalized content.
     expect(blocks.join("").replace(/\s+/gu, "")).toContain("Thirdsentencestaysvisible.");
+  });
+
+  it("does not carry a held call into the next assistant message", async () => {
+    const blocks: string[] = [];
+    const { emit, subscription } = createSubscribedSessionHarness({
+      runId: "block-hold-next-message",
+      onBlockReply: (payload) => {
+        blocks.push(payload.text ?? "");
+      },
+      blockReplyBreak: "text_end",
+      blockReplyChunking: { minChars: 4, maxChars: 20 },
+    });
+
+    // The first reply ends on an open JSON payload, so its block drain is held.
+    const first = { role: "assistant", phase: "final_answer", content: [] as unknown[] };
+    emit({ type: "message_start", message: first });
+    first.content = [{ type: "text", text: "[a]\n{" }];
+    emit({
+      type: "message_update",
+      message: first,
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "[a]\n{" },
+    });
+    emit({
+      type: "message_update",
+      message: first,
+      assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "[a]\n{" },
+    });
+    emit({ type: "message_end", message: first });
+    await subscription.waitForPendingEvents();
+    blocks.length = 0;
+
+    // The next reply is plain prose; its first delta is longer than the previous held tail.
+    const doc = "Hello there, this is visible prose without newlines";
+    const second = { role: "assistant", phase: "final_answer", content: [] as unknown[] };
+    emit({ type: "message_start", message: second });
+    for (let at = 0; at < doc.length; at += 8) {
+      second.content = [{ type: "text", text: doc.slice(0, at + 8) }];
+      emit({
+        type: "message_update",
+        message: second,
+        assistantMessageEvent: {
+          type: "text_delta",
+          contentIndex: 0,
+          delta: doc.slice(at, at + 8),
+        },
+      });
+    }
+    await subscription.waitForPendingEvents();
+    // Block replies arrive before text_end only when the previous hold was cleared.
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks.join("").replace(/\s+/gu, "")).toContain("Hellothere");
+    second.content = [{ type: "text", text: doc }];
+    emit({
+      type: "message_update",
+      message: second,
+      assistantMessageEvent: { type: "text_end", contentIndex: 0, content: doc },
+    });
+    emit({ type: "message_end", message: second });
   });
 });
