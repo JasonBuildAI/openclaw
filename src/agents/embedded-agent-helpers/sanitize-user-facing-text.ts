@@ -21,6 +21,7 @@ import {
 import {
   findCodeRegions,
   isInsideCode,
+  projectLinesOutsideCode,
   stripLinesOutsideCode,
 } from "../../shared/text/code-regions.js";
 import { finalTagTextFilter } from "../../shared/text/final-tags.js";
@@ -40,22 +41,35 @@ import {
   stripInternalRuntimeContext,
 } from "../internal-runtime-context.js";
 
+const TOOL_CALLS_OMITTED_TOKEN = "[tool calls omitted]";
 const TOOL_CALLS_OMITTED_PLACEHOLDER_LINE_RE = /^[ \t]*\[tool calls omitted\][ \t]*$/i;
+
+function isInternalPlaceholderLine(line: string): boolean {
+  return (
+    TOOL_CALLS_OMITTED_PLACEHOLDER_LINE_RE.test(line) || line.trim() === EXEC_NO_OUTPUT_PLACEHOLDER
+  );
+}
 
 function stripInternalPlaceholderLines(text: string): string {
   if (
-    !text.toLowerCase().includes("[tool calls omitted]") &&
+    !text.toLowerCase().includes(TOOL_CALLS_OMITTED_TOKEN) &&
     !text.includes(EXEC_NO_OUTPUT_PLACEHOLDER)
   ) {
     return text;
   }
-  return stripLinesOutsideCode(
-    text,
-    (line) =>
-      TOOL_CALLS_OMITTED_PLACEHOLDER_LINE_RE.test(line) ||
-      line.trim() === EXEC_NO_OUTPUT_PLACEHOLDER,
-  );
+  return stripLinesOutsideCode(text, isInternalPlaceholderLine);
 }
+
+// One quoted "(no output)" transcript line latches this stage for the rest of the reply. Without
+// a checkpoint the canonical scan - and the Markdown code scan it needs - re-ran the whole reply
+// on every delta: 13.5 s for a 16 KB reply that opens with a fenced command transcript.
+const internalPlaceholderLinesTextFilter: TextFilter = {
+  transform: stripInternalPlaceholderLines,
+  activationTokens: [EXEC_NO_OUTPUT_PLACEHOLDER, TOOL_CALLS_OMITTED_TOKEN],
+  // Completed lines never change again, so only the unfinished tail needs the canonical scan.
+  checkpoint: (text, settledBoundary) =>
+    projectLinesOutsideCode(text, isInternalPlaceholderLine, settledBoundary),
+};
 
 const MARKDOWN_LINE_PREFIX =
   "[ \\t]*(?:(?:>|[-+*](?=[ \\t])|#{1,6}(?=[ \\t])|\\d{1,9}[.)](?=[ \\t]))[ \\t]*)*";
@@ -423,10 +437,7 @@ export function userFacingTextFilters(
     },
     minimaxToolCallTextFilter(streaming),
     toolCallXmlTextFilter({ stripFunctionCallsXmlPayloads: true }),
-    {
-      transform: stripInternalPlaceholderLines,
-      activationTokens: [EXEC_NO_OUTPUT_PLACEHOLDER, "[tool calls omitted]"],
-    },
+    internalPlaceholderLinesTextFilter,
     ...(errorContext ? [assistantTraceTextFilter] : []),
     legacyBracketToolCallTextFilter,
     plainToolCallTextFilter,
