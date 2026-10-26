@@ -109,6 +109,15 @@ it("matches the batch sanitizer when the placeholder latches after a long placeh
   expect(visible).toContain("Afterwards the reply continues.");
 });
 
+it("matches the batch sanitizer after a replacement that adds a placeholder line", () => {
+  const stream = createAssistantVisibleStreamText("final_answer");
+  stream.append("Intro without any placeholder.\n\nMore text.");
+  const replacement = "Intro without any placeholder.\n\n$ npm run build\n(no output)\n\nTail.";
+  stream.replace(replacement);
+  expect(stream.text).toBe(sanitizeAssistantVisibleStreamText(replacement, "final_answer"));
+  expect(stream.text).not.toContain("(no output)");
+});
+
 it("matches the batch sanitizer while a quoted placeholder line is still being typed", () => {
   const chunks = ["Intro.\n\n(no out", "put)", "\n", "Outro."];
   const stream = createAssistantVisibleStreamText("final_answer");
