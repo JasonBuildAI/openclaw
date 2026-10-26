@@ -3,16 +3,10 @@ import { createSubscribedSessionHarness } from "./embedded-agent-subscribe.e2e-h
 
 const SENTINEL = "SECRET CONTENT";
 
-function streamReply(params: {
-  doc: string;
-  chunk: number;
-  phased: boolean;
-  blockReplyBreak?: "text_end" | "message_end";
-  emit: (evt: unknown) => void;
-}) {
-  const message: { role: string; phase?: string; content: unknown[] } = {
+function streamReply(params: { doc: string; chunk: number; emit: (evt: unknown) => void }) {
+  const message: { role: string; phase: string; content: unknown[] } = {
     role: "assistant",
-    ...(params.phased ? { phase: "final_answer" } : {}),
+    phase: "final_answer",
     content: [],
   };
   params.emit({ type: "message_start", message });
@@ -59,7 +53,7 @@ describe("block reply plain-text tool calls", () => {
         blockReplyBreak: "text_end",
         blockReplyChunking: { minChars: 8, maxChars: 24 },
       });
-      streamReply({ doc, chunk, phased: true, emit });
+      streamReply({ doc, chunk, emit });
       await subscription.waitForPendingEvents();
       expect(leaked(blocks), `chunk=${chunk} blocks=${JSON.stringify(blocks)}`).toBe(false);
     }
@@ -78,7 +72,6 @@ describe("block reply plain-text tool calls", () => {
     streamReply({
       doc: "Intro paragraph stays visible.\n[tool:read] {}\n[tool:read] {}\nDone after the calls.\n",
       chunk: 2,
-      phased: true,
       emit,
     });
     await subscription.waitForPendingEvents();
@@ -99,7 +92,6 @@ describe("block reply plain-text tool calls", () => {
     streamReply({
       doc: "Example:\n\n```text\n[tool:read] {}\n```\n\nAfter the example.\n",
       chunk: 3,
-      phased: true,
       emit,
     });
     await subscription.waitForPendingEvents();
@@ -120,7 +112,6 @@ describe("block reply plain-text tool calls", () => {
     streamReply({
       doc: "First sentence stays visible. Second sentence stays visible. Third sentence stays visible.\n",
       chunk: 4,
-      phased: true,
       emit,
     });
     await subscription.waitForPendingEvents();
