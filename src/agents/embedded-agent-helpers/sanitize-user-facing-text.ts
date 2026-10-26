@@ -60,16 +60,61 @@ function stripInternalPlaceholderLines(text: string): string {
   return stripLinesOutsideCode(text, isInternalPlaceholderLine);
 }
 
-// One quoted "(no output)" transcript line latches this stage for the rest of the reply. Without
-// a checkpoint the canonical scan - and the Markdown code scan it needs - re-ran the whole reply
-// on every delta: 13.5 s for a 16 KB reply that opens with a fenced command transcript.
+// Quotes of an empty command transcript latch this stage for the rest of the reply. The canonical
+// scan (and the Markdown code scan it needs) used to run on the whole reply for every delta: 17.9 s
+// for a 16 KB reply that opens with a fenced transcript, 1.4 s for the same reply as a blockquote.
+// Two cheap probes keep ordinary replies away from it: only a completed (or currently unfinished)
+// line that the strip predicate accepts can change the output, and completed lines never change.
 const internalPlaceholderLinesTextFilter: TextFilter = {
   transform: stripInternalPlaceholderLines,
-  activationTokens: [EXEC_NO_OUTPUT_PLACEHOLDER, TOOL_CALLS_OMITTED_TOKEN],
-  // Completed lines never change again, so only the unfinished tail needs the canonical scan.
-  checkpoint: (text, settledBoundary) =>
-    projectLinesOutsideCode(text, isInternalPlaceholderLine, settledBoundary),
+  create: createInternalPlaceholderLinesProjector,
 };
+
+function createInternalPlaceholderLinesProjector(): TextProjector {
+  let matched = false;
+  let lineTail = "";
+  // Completed lines are final, so only the incoming delta and the unfinished line are scanned.
+  const scanAppendedLines = (appended: string): boolean => {
+    let start = 0;
+    while (true) {
+      const newline = appended.indexOf("\n", start);
+      if (newline === -1) {
+        lineTail += appended.slice(start);
+        return isInternalPlaceholderLine(lineTail);
+      }
+      const line =
+        (start === 0 ? lineTail : "") + appended.slice(start, newline).replace(/\r$/u, "");
+      if (isInternalPlaceholderLine(line)) {
+        lineTail = "";
+        return true;
+      }
+      start = newline + 1;
+      lineTail = "";
+    }
+  };
+  return createConditionalTextProjector(
+    stripInternalPlaceholderLines,
+    (input) => {
+      if (matched) {
+        return true;
+      }
+      if (input.delta === null) {
+        lineTail = "";
+        matched = input.text
+          .split("\n")
+          .some((line, index, lines) =>
+            isInternalPlaceholderLine(index === lines.length - 1 ? line : line.replace(/\r$/u, "")),
+          );
+        return matched;
+      }
+      matched = scanAppendedLines(input.delta);
+      return matched;
+    },
+    // Completed lines never change again, so only the unfinished tail needs the canonical scan.
+    (text, settledBoundary) =>
+      projectLinesOutsideCode(text, isInternalPlaceholderLine, settledBoundary),
+  );
+}
 
 const MARKDOWN_LINE_PREFIX =
   "[ \\t]*(?:(?:>|[-+*](?=[ \\t])|#{1,6}(?=[ \\t])|\\d{1,9}[.)](?=[ \\t]))[ \\t]*)*";

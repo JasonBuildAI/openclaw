@@ -70,6 +70,31 @@ it.each([1, 3, 4, 7])(
   },
 );
 
+it.each([2, 4])(
+  "bounds placeholder-line work for a quoted transcript that cannot change the output at %i-character deltas",
+  (size) => {
+    // A blockquote line keeps its "> " prefix, so the strip predicate never accepts one and the
+    // stage must not run at all: it used to rescan the reply until the stream ended.
+    let quote = "> $ npm run build\n> (no output)\n";
+    while (quote.length < 16_384) {
+      quote += `> Step ${quote.length} finished with exit code 3 right away.\n`;
+    }
+    const blockquote = quote.slice(0, 16_384);
+    placeholderWork.scannedCharacters = 0;
+    expectCanonicalStream(blockquote, size, "blockquote transcript");
+    expect(placeholderWork.scannedCharacters).toBeLessThan(blockquote.length * 8);
+
+    let phrase = "";
+    while (phrase.length < 16_384) {
+      phrase += `Step ${phrase.length} reported (no output) in the captured log.\n\n`;
+    }
+    const inlineMention = phrase.slice(0, 16_384);
+    placeholderWork.scannedCharacters = 0;
+    expectCanonicalStream(inlineMention, size, "inline mention");
+    expect(placeholderWork.scannedCharacters).toBeLessThan(inlineMention.length * 8);
+  },
+);
+
 it.each([1, 3, 7])(
   "keeps every placeholder shape identical to the batch sanitizer at %i-character deltas",
   (size) => {
@@ -85,6 +110,10 @@ it.each([1, 3, 7])(
       [
         "repeated placeholder lines",
         "(no output)\n(no output)\n\n[tool calls omitted]\n(no output)",
+      ],
+      [
+        "single blockquote transcript",
+        "> $ npm run build\n> (no output)\n> A quoted explanation follows.\n",
       ],
     ] as const;
     for (const [label, source] of shapes) {
