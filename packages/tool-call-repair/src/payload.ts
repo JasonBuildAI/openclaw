@@ -571,7 +571,14 @@ export function projectPlainTextToolCallBlocks(
     resolveProtectedRanges?: PlainTextToolCallProtectedRangeResolver;
     settleBefore?: number;
   } = {},
-): { text: string; retainStart: number; retainedOutputStart: number } {
+): {
+  text: string;
+  retainStart: number;
+  retainedOutputStart: number;
+  unsettled: boolean;
+  /** True only when the retained tail is an unfinished JSON payload prefix. */
+  openJsonPayload: boolean;
+} {
   let protectedRanges: ReturnType<PlainTextToolCallProtectedRangeResolver> | undefined;
   const isProtected = (offset: number) =>
     isOffsetInProtectedRanges(
@@ -614,7 +621,18 @@ export function projectPlainTextToolCallBlocks(
     pending ||= scan.kind === "prefix" || !scan.settled;
     let blockEnd = scan.kind === "complete" ? scan.end : scan.completeEnd;
     if (blockEnd === undefined) {
-      return { text: result + text.slice(cursor), retainStart, retainedOutputStart };
+      // A trailing candidate may still become a hidden call; the caller must not publish it.
+      return {
+        text: result + text.slice(cursor),
+        retainStart,
+        retainedOutputStart,
+        unsettled: true,
+        openJsonPayload:
+          scan.kind === "prefix" &&
+          scan.payloadStart !== undefined &&
+          scan.json.kind === "prefix" &&
+          scan.json.candidate?.payload !== undefined,
+      };
     }
     result += text.slice(cursor, index);
     while (true) {
@@ -648,5 +666,11 @@ export function projectPlainTextToolCallBlocks(
     retainStart = text.length;
     retainedOutputStart = result.length;
   }
-  return { text: result, retainStart, retainedOutputStart };
+  return {
+    text: result,
+    retainStart,
+    retainedOutputStart,
+    unsettled: pending,
+    openJsonPayload: false,
+  };
 }

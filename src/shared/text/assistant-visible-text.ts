@@ -14,7 +14,7 @@ import {
   traceLineHeads,
   INTERNAL_TRACE_LINE_RE,
 } from "./assistant-text-transforms.js";
-import { projectLinesOutsideCode } from "./code-regions.js";
+import { findCodeRegions, projectLinesOutsideCode } from "./code-regions.js";
 import { downgradedToolCallTextFilter } from "./downgraded-tool-call-text.js";
 import { orderInternalScaffoldingStages } from "./internal-scaffolding-stages.js";
 import { modelSpecialTokensTextFilter } from "./model-special-tokens.js";
@@ -239,6 +239,26 @@ export const plainToolCallTextFilter: TextFilter = {
   transform: plainToolCallTransform,
   create: createPlainToolCallTextProjector,
 };
+
+/**
+ * Settlement of a plain-text tool-call candidate at the end of visible text. Streaming may
+ * publish that tail and retract it later through a replacement, but block replies
+ * (already-delivered chat messages) cannot be retracted, so their drain waits until the
+ * candidate settles. `openJsonPayload` marks the common unfinished-JSON case, where only a
+ * structural terminator can change the answer.
+ */
+export function readPlainTextToolCallSettlement(text: string): {
+  unsettled: boolean;
+  openJsonPayload: boolean;
+} {
+  if (!text) {
+    return { unsettled: false, openJsonPayload: false };
+  }
+  const projected = projectPlainTextToolCallBlocks(text, {
+    resolveProtectedRanges: findCodeRegions,
+  });
+  return { unsettled: projected.unsettled, openJsonPayload: projected.openJsonPayload };
+}
 
 export function sanitizeAssistantVisibleTextWithProfile(
   text: string,

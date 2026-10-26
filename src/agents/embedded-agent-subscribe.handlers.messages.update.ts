@@ -6,7 +6,10 @@ import {
   readAssistantTextBlocksForPhase,
   resolveAssistantMessagePhase,
 } from "../shared/chat-message-content.js";
-import { toolCallXmlTextFilter } from "../shared/text/assistant-visible-text.js";
+import {
+  readPlainTextToolCallSettlement,
+  toolCallXmlTextFilter,
+} from "../shared/text/assistant-visible-text.js";
 import { downgradedToolCallTextFilter } from "../shared/text/downgraded-tool-call-text.js";
 import { findNativeToolMarkerTextBlocks } from "../shared/text/native-tool-marker.js";
 import { createTextProjection, trimTextFilter } from "../shared/text/text-projection.js";
@@ -613,7 +616,28 @@ export function handleMessageUpdate(
     return undefined;
   }
   if (ctx.params.onBlockReply && ctx.blockChunking) {
-    ctx.blockChunker.drain({ force: false, emit: ctx.emitBlockChunk });
+    // A trailing plain-text call candidate can still become a hidden call. Drained block
+    // replies are delivered chat messages that cannot be retracted, so hold them until the
+    // canonical grammar settles the candidate; partial replies keep their replacement path.
+    const buffered = ctx.blockChunker.bufferedText;
+    const previous = ctx.state.blockReplyToolCallHold;
+    // An open JSON payload can settle only on a structural terminator, so ordinary payload
+    // appends reuse the held verdict instead of rescanning the growing candidate.
+    const maySettle = /[}\]<>\r\n]/u.test(chunk);
+    const unchangedOpenPayload =
+      chunk.length > 0 &&
+      !finalText &&
+      !maySettle &&
+      previous?.unsettled === true &&
+      previous.openJsonPayload === true &&
+      buffered.length >= previous.length;
+    const settlement = unchangedOpenPayload
+      ? { unsettled: true, openJsonPayload: true }
+      : readPlainTextToolCallSettlement(buffered);
+    ctx.state.blockReplyToolCallHold = { length: buffered.length, ...settlement };
+    if (finalText || !settlement.unsettled) {
+      ctx.blockChunker.drain({ force: false, emit: ctx.emitBlockChunk });
+    }
   }
   if (evtType === "text_end") {
     const assistantMessageIndex = ctx.state.assistantMessageIndex;
