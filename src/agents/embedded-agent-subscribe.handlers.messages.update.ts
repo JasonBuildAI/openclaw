@@ -622,8 +622,10 @@ export function handleMessageUpdate(
     const buffered = ctx.blockChunker.bufferedText;
     const previous = ctx.state.blockReplyToolCallHold;
     // An open JSON payload can settle only on a structural terminator, so ordinary payload
-    // appends reuse the held verdict instead of rescanning the growing candidate.
-    const maySettle = /[}\]<>\r\n]/u.test(chunk);
+    // appends reuse the held verdict instead of rescanning the growing candidate. A backtick
+    // is the exception: it can open or close a Markdown code span, which changes whether the
+    // tail is protected literal text or a live candidate, so it invalidates the cache too.
+    const maySettle = /[}\]<>\r\n`]/u.test(chunk);
     const unchangedOpenPayload =
       chunk.length > 0 &&
       !finalText &&

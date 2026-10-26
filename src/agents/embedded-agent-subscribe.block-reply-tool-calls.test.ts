@@ -179,4 +179,61 @@ describe("block reply plain-text tool calls", () => {
     });
     emit({ type: "message_end", message: second });
   });
+
+  it("resumes block delivery when a backtick closes the held candidate as inline code", async () => {
+    const blocks: string[] = [];
+    const { emit, subscription } = createSubscribedSessionHarness({
+      runId: "block-hold-inline-code-close",
+      onBlockReply: (payload) => {
+        blocks.push(payload.text ?? "");
+      },
+      blockReplyBreak: "text_end",
+      blockReplyChunking: { minChars: 64, maxChars: 128 },
+    });
+
+    const message = { role: "assistant", phase: "final_answer", content: [] as unknown[] };
+    emit({ type: "message_start", message });
+    const opening = '`\n[tool:write]\n{"content":"a';
+    message.content = [{ type: "text", text: opening }];
+    emit({
+      type: "message_update",
+      message,
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: opening },
+    });
+
+    // The closing backtick turns the tail into protected multiline inline code. That is an
+    // ownership change no structural terminator announces, so the cached hold must drop.
+    const closing = "`";
+    message.content = [{ type: "text", text: opening + closing }];
+    emit({
+      type: "message_update",
+      message,
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: closing },
+    });
+
+    const prose =
+      " This literal example stays visible and keeps streaming as ordinary block replies without any structural terminator.";
+    message.content = [{ type: "text", text: opening + closing + prose }];
+    emit({
+      type: "message_update",
+      message,
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: prose },
+    });
+    await subscription.waitForPendingEvents();
+
+    // Keeping the cached verdict would suppress every drain until text_end.
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks.join("").replace(/\s+/gu, "")).toContain("ordinaryblockreplies");
+
+    emit({
+      type: "message_update",
+      message,
+      assistantMessageEvent: {
+        type: "text_end",
+        contentIndex: 0,
+        content: opening + closing + prose,
+      },
+    });
+    emit({ type: "message_end", message });
+  });
 });
