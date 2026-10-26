@@ -628,8 +628,9 @@ export function handleMessageUpdate(
       chunk.length > 0 &&
       !finalText &&
       !maySettle &&
-      previous?.unsettled === true &&
-      previous.openJsonPayload === true &&
+      previous !== undefined &&
+      previous.unsettled &&
+      previous.openJsonPayload &&
       buffered.length >= previous.length;
     const settlement = unchangedOpenPayload
       ? { unsettled: true, openJsonPayload: true }
