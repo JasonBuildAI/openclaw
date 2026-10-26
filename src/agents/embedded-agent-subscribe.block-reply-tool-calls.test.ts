@@ -54,7 +54,7 @@ describe("block reply plain-text tool calls", () => {
       const { emit, subscription } = createSubscribedSessionHarness({
         runId: `block-hold-${chunk}`,
         onBlockReply: (payload) => {
-          blocks.push(payload.text);
+          blocks.push(payload.text ?? "");
         },
         blockReplyBreak: "text_end",
         blockReplyChunking: { minChars: 8, maxChars: 24 },
@@ -70,7 +70,7 @@ describe("block reply plain-text tool calls", () => {
     const { emit, subscription } = createSubscribedSessionHarness({
       runId: "block-hold-prose",
       onBlockReply: (payload) => {
-        blocks.push(payload.text);
+        blocks.push(payload.text ?? "");
       },
       blockReplyBreak: "text_end",
       blockReplyChunking: { minChars: 8, maxChars: 40 },
@@ -91,7 +91,7 @@ describe("block reply plain-text tool calls", () => {
     const { emit, subscription } = createSubscribedSessionHarness({
       runId: "block-hold-fence",
       onBlockReply: (payload) => {
-        blocks.push(payload.text);
+        blocks.push(payload.text ?? "");
       },
       blockReplyBreak: "text_end",
       blockReplyChunking: { minChars: 8, maxChars: 60 },
@@ -112,7 +112,7 @@ describe("block reply plain-text tool calls", () => {
     const { emit, subscription } = createSubscribedSessionHarness({
       runId: "block-hold-control",
       onBlockReply: (payload) => {
-        blocks.push(payload.text);
+        blocks.push(payload.text ?? "");
       },
       blockReplyBreak: "text_end",
       blockReplyChunking: { minChars: 8, maxChars: 24 },
