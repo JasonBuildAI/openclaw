@@ -273,7 +273,7 @@ File contents here`,
       "Start<think>first thought</think>Middle<think>second thought</think>End",
       "StartMiddleEnd",
     ],
-  ] as const)("%s", (_name, input, expected, metadata = {}) => {
+  ] as const)("%s", (...[_name, input, expected, metadata]) => {
     const texts = typeof input === "string" ? [input] : input;
     const msg = makeAssistantMessage({
       ...metadata,

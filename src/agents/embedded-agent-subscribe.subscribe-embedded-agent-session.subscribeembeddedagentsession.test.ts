@@ -712,7 +712,7 @@ async function streamReply(params: {
   }
   await params.beforeEnd?.();
   emitResponsesText(params.emit, "text_end", prefix, "canonical-answer");
-  emitMessage(params.emit, "message_end", textAssistant(prefix));
+  emitMessage(params.emit, "message_end", { ...textAssistant(prefix), phase: "final_answer" });
 }
 
 it.each(Object.entries(documents))(
