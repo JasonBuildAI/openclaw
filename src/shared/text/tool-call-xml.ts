@@ -8,7 +8,11 @@ import {
   findCodeRegions,
   isInsideSettledBlockCode,
 } from "./code-regions.js";
-import { createConditionalTextProjector, type TextFilter } from "./text-projection.js";
+import {
+  createConditionalTextProjector,
+  type TextFilter,
+  type TextProjector,
+} from "./text-projection.js";
 import {
   isToolCallTagPrefix,
   stripToolCallXmlTagsInternal,
@@ -34,6 +38,7 @@ export function toolCallXmlTextFilter(
       let sourceTail = "";
       let output = "";
       let ownership: ReturnType<typeof findCodeOwnership> | undefined;
+      let retained: { prefix: string; tail: string } | undefined;
       let projection: ToolCallXmlProjection = {
         appendSafe: false,
         resolveCodeOwnership: findCodeOwnership,
@@ -41,6 +46,7 @@ export function toolCallXmlTextFilter(
       let transformed = false;
       const transform = (text: string) => {
         transformed = true;
+        retained = undefined;
         codeRegions = undefined;
         projection = { appendSafe: false, resolveCodeOwnership: findCodeOwnership };
         if (heldPrefix !== undefined) {
@@ -51,13 +57,19 @@ export function toolCallXmlTextFilter(
         ownership = /[`~\t]| {4}/u.test(text) ? findCodeOwnership(text) : undefined;
         sourceTail = text.slice(-4);
         projection.appendSafe = true;
-        return stripToolCallXmlTagsInternal(
+        const visible = stripToolCallXmlTagsInternal(
           text,
           options,
           streaming,
           () => ownership?.regions ?? [],
           projection,
         );
+        if (ownership) {
+          // Inline code can become image or link-title text after later Markdown arrives.
+          const prefix = visible === text ? text.slice(0, ownership.retainStart).trimEnd() : "";
+          retained = { prefix, tail: visible.slice(prefix.length) };
+        }
+        return visible;
       };
       const project = createConditionalTextProjector(transform, ({ text, delta }) => {
         heldPrefix = undefined;
@@ -148,7 +160,7 @@ export function toolCallXmlTextFilter(
       // Published text is a source prefix and `withheld` carries the rest only while
       // no earlier transform has suppressed bytes.
       let synced = true;
-      return (input) => {
+      const render: TextProjector = (input) => {
         if (!active) {
           transformed = false;
           const result = project(input);
@@ -230,6 +242,9 @@ export function toolCallXmlTextFilter(
           source = input.text;
           sourceTail = (sourceTail + delta).slice(-4);
           output += delta;
+          if (retained) {
+            retained = { prefix: retained.prefix, tail: retained.tail + delta };
+          }
           return { text: output, delta };
         }
         // Refresh the canonical result when XML or Markdown can revise earlier text.
@@ -246,6 +261,16 @@ export function toolCallXmlTextFilter(
                 ? output.slice(previous.length)
                 : null,
         };
+      };
+      return (input) => {
+        const result = render(input);
+        const upstream =
+          result.retained ?? (input.retained ? { prefix: "", tail: result.text } : undefined);
+        const settled =
+          retained && (!upstream || retained.prefix.length < upstream.prefix.length)
+            ? retained
+            : upstream;
+        return settled ? { ...result, retained: settled } : result;
       };
     },
   };
