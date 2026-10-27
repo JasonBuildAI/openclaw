@@ -48,6 +48,7 @@ const documents = [
 // Retain the contributor's append boundaries: later bytes can change an earlier
 // XML payload or grant Markdown ownership without introducing another tag.
 const transitions = [
+  ["empty append after suppressed XML", ["<\n\na", "", "\n\n<"]],
   ["XML removal exposes a partial parameter", ["<para<tool_call/>", "meter/>"]],
   [
     "XML removal exposes an incomplete generic closer",

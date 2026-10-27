@@ -193,13 +193,14 @@ export function toolCallXmlTextFilter(
                   : null;
             output = text;
             withheld = "";
-            synced = !transformed;
+            synced = input.delta === "" ? synced : !transformed;
             releasedHold = false;
             return { text, delta, ...(result.retained ? { retained: result.retained } : {}) };
           }
           withheld = "";
           releasedHold = false;
-          synced = !transformed;
+          // Empty appends reuse a cached projection that may still suppress source bytes.
+          synced = input.delta === "" ? synced : !transformed;
           output = result.text;
           return result;
         }
