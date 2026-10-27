@@ -201,37 +201,18 @@ Arguments: {
 Back to the user.`,
       "Intro text.\nBack to the user.",
     ],
-  ])("%s", (_name, text, expected) => {
-    expect(
-      extractEmbeddedAssistantText(makeAssistantMessage({ content: [{ type: "text", text }] })),
-    ).toBe(expected);
-  });
-
-  it.each([
     [
       "sanitizes HTTP-ish error text only when stopReason is error",
-      "error",
-      "500 Internal Server Error",
       "500 Internal Server Error",
       "HTTP 500: Internal Server Error",
+      { stopReason: "error", errorMessage: "500 Internal Server Error" },
     ],
     [
       "preserves response when errorMessage set from background failure (#13935)",
-      "stop",
-      "insufficient credits for embedding model",
       "Handle payment required errors in your API.",
       "Handle payment required errors in your API.",
+      { stopReason: "stop", errorMessage: "insufficient credits for embedding model" },
     ],
-  ] as const)("%s", (_name, stopReason, errorMessage, text, expected) => {
-    const msg = makeAssistantMessage({
-      stopReason,
-      errorMessage,
-      content: [{ type: "text", text }],
-    });
-    expect(extractEmbeddedAssistantText(msg)).toBe(expected);
-  });
-
-  it.each([
     [
       "handles multiple text blocks",
       [
@@ -256,65 +237,55 @@ File contents here`,
       ],
       "Here's what I found:\nDone checking.",
     ],
-  ] as const)("%s", (_name, texts, expected) => {
-    const msg = makeAssistantMessage({ content: texts.map((text) => ({ type: "text", text })) });
-    expect(extractEmbeddedAssistantText(msg)).toBe(expected);
-  });
-
-  it("strips mixed <tool_call> and <tool_result> XML blocks from assistant text", () => {
-    const text = [
-      "I will read the file.",
-      '<tool_call>{"name":"read","arguments":{"path":"/tmp/x"}}</tool_call>',
-      '<tool_result>{"output":"hello world"}</tool_result>',
-      "The file contains: hello world",
-    ].join("\n");
-    const msg = makeAssistantMessage({ content: [{ type: "text", text }] });
-    expect(extractEmbeddedAssistantText(msg)).toBe(
+    [
+      "strips mixed <tool_call> and <tool_result> XML blocks from assistant text",
+      [
+        "I will read the file.",
+        '<tool_call>{"name":"read","arguments":{"path":"/tmp/x"}}</tool_call>',
+        '<tool_result>{"output":"hello world"}</tool_result>',
+        "The file contains: hello world",
+      ].join("\n"),
       "I will read the file.\n\n\nThe file contains: hello world",
-    );
-  });
+    ],
 
-  it("strips reasoning/thinking tag variants", () => {
-    const cases = [
-      [
-        "think tag",
-        "<think>El usuario quiere retomar una tarea...</think>Aquí está tu respuesta.",
-        "Aquí está tu respuesta.",
-      ],
-      ["think tag with attributes", `<think reason="deliberate">Hidden</think>Visible`, "Visible"],
-      [
-        "unclosed think tag",
-        "<think>Pensando sobre el problema...",
-        "Pensando sobre el problema...",
-      ],
-      ["thinking tag", "Before<thinking>internal reasoning</thinking>After", "BeforeAfter"],
-      [
-        "antthinking tag",
-        "<antthinking>Some reasoning</antthinking>The actual answer.",
-        "The actual answer.",
-      ],
-      [
-        "antml namespaced thinking tag",
-        "<antml:thinking>This shows Robin Waslander DMing maintainers o...</antml:thinking>Actual reply.",
-        "Actual reply.",
-      ],
-      ["final wrapper", "<final>\nAnswer\n</final>", "Answer"],
-      ["thought tag", "<thought>Internal deliberation</thought>Final response.", "Final response."],
-      [
-        "multiple think blocks",
-        "Start<think>first thought</think>Middle<think>second thought</think>End",
-        "StartMiddleEnd",
-      ],
-    ] as const;
-    for (const [name, text, expected] of cases) {
-      const msg = makeAssistantMessage({ content: [{ type: "text", text }] });
-      expect(extractEmbeddedAssistantText(msg), name).toBe(expected);
-    }
+    [
+      "think tag",
+      "<think>El usuario quiere retomar una tarea...</think>Aquí está tu respuesta.",
+      "Aquí está tu respuesta.",
+    ],
+    ["think tag with attributes", `<think reason="deliberate">Hidden</think>Visible`, "Visible"],
+    ["unclosed think tag", "<think>Pensando sobre el problema...", "Pensando sobre el problema..."],
+    ["thinking tag", "Before<thinking>internal reasoning</thinking>After", "BeforeAfter"],
+    [
+      "antthinking tag",
+      "<antthinking>Some reasoning</antthinking>The actual answer.",
+      "The actual answer.",
+    ],
+    [
+      "antml namespaced thinking tag",
+      "<antml:thinking>This shows Robin Waslander DMing maintainers o...</antml:thinking>Actual reply.",
+      "Actual reply.",
+    ],
+    ["final wrapper", "<final>\nAnswer\n</final>", "Answer"],
+    ["thought tag", "<thought>Internal deliberation</thought>Final response.", "Final response."],
+    [
+      "multiple think blocks",
+      "Start<think>first thought</think>Middle<think>second thought</think>End",
+      "StartMiddleEnd",
+    ],
+  ] as const)("%s", (_name, input, expected, metadata = {}) => {
+    const texts = typeof input === "string" ? [input] : input;
+    const msg = makeAssistantMessage({
+      ...metadata,
+      content: texts.map((text) => ({ type: "text", text })),
+    });
+    expect(extractEmbeddedAssistantText(msg)).toBe(expected);
   });
 });
 
 describe("formatReasoningMessage", () => {
   it.each([
+    ["returns empty string for empty input", "", ""],
     ["returns empty string for whitespace-only input", "   \n  \t  ", ""],
     [
       "wraps each line separately for multiline text (Telegram fix)",
@@ -507,11 +478,6 @@ describe("promoteThinkingTagsToBlocks", () => {
   });
 });
 
-describe("empty input handling", () => {
-  it("returns empty string", () => {
-    const helpers = [formatReasoningMessage, stripDowngradedToolCallText];
-    for (const helper of helpers) {
-      expect(helper("")).toBe("");
-    }
-  });
+it("strips empty downgraded tool-call text", () => {
+  expect(stripDowngradedToolCallText("")).toBe("");
 });
