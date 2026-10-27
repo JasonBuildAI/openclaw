@@ -99,12 +99,11 @@ function createInternalPlaceholderLinesProjector(): TextProjector {
         return true;
       }
       if (input.delta === null) {
+        // A replacement can end mid-placeholder. Re-scan it through the append scanner so the
+        // unfinished tail is carried into the next delta instead of being dropped.
+        matched = false;
         lineTail = "";
-        matched = input.text
-          .split("\n")
-          .some((line, index, lines) =>
-            isInternalPlaceholderLine(index === lines.length - 1 ? line : line.replace(/\r$/u, "")),
-          );
+        matched = scanAppendedLines(input.text);
         return matched;
       }
       matched = scanAppendedLines(input.delta);
