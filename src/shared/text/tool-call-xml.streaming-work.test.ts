@@ -58,6 +58,63 @@ describe("toolCallXmlTextFilter streamed projection work", () => {
     }
   });
 
+  it("bounds whole-reply comparisons, scans, and slices at partial tag boundaries", () => {
+    // Every "<" left at a delta edge holds the unfinished tag, so the projector must
+    // neither re-compare, re-search, nor re-slice the accumulated reply.
+    const source = htmlAnswer(48_000);
+    const prefixProbe = vi.spyOn(String.prototype, "startsWith");
+    const indexProbe = vi.spyOn(String.prototype, "indexOf");
+    const sliceProbe = vi.spyOn(String.prototype, "slice");
+    let comparedCharacters = 0;
+    let searchedCharacters = 0;
+    let slicedCharacters = 0;
+    try {
+      const streamed = streamXml(source);
+      expect(streamed.text).toBe(source);
+      expect(streamed.delivered).toBe(source);
+      comparedCharacters = prefixProbe.mock.calls.reduce(
+        (total, [search]) => total + search.length,
+        0,
+      );
+      searchedCharacters = indexProbe.mock.calls.reduce((total, [search], index) => {
+        const searched = indexProbe.mock.contexts[index];
+        return total + (search === "<" && typeof searched === "string" ? searched.length : 0);
+      }, 0);
+      slicedCharacters = sliceProbe.mock.calls.reduce((total, [start, end], index) => {
+        const sliced = sliceProbe.mock.contexts[index];
+        // The held path used to materialize the visible prefix with slice(0, heldPrefix).
+        return (
+          total +
+          (start === 0 && typeof end === "number" && end > 1024 && typeof sliced === "string"
+            ? sliced.length
+            : 0)
+        );
+      }, 0);
+    } finally {
+      prefixProbe.mockRestore();
+      indexProbe.mockRestore();
+      sliceProbe.mockRestore();
+    }
+    expect(comparedCharacters).toBeLessThan(source.length * 4);
+    expect(searchedCharacters).toBeLessThan(source.length * 8);
+    expect(slicedCharacters).toBeLessThan(source.length * 4);
+  });
+
+  it.each([
+    ["<script>    <", "b"],
+    ["After <a", ' href="/x">link</a>'],
+  ])("keeps a held tag across replace() for %j", (held, tail) => {
+    const filter = toolCallXmlTextFilter({ stripFunctionResponseAfterPluralToolCalls: true }, true);
+    const projection = createTextProjection([filter]);
+    const replaced = projection.replace(held);
+    expect(replaced.text).toBe(held.slice(0, held.lastIndexOf("<")));
+    const appended = projection.append(tail);
+    const delivered = appended.delta === null ? appended.text : replaced.text + appended.delta;
+    const expected = filter.transform(held + tail);
+    expect(appended.text).toBe(expected);
+    expect(delivered).toBe(expected);
+  });
+
   const literalFence = "```text\n<think>literal code</think>\n```\nOrdinary prose follows.\n\n";
   it.each([
     [
@@ -139,6 +196,9 @@ describe("toolCallXmlTextFilter streamed projection work", () => {
       "Before <function",
       "Before </t",
       "Before <parameter ",
+      "<\n\na\n\n<",
+      "<\n\na",
+      "<`</f\n\n<```",
       '<tool_call>{"path":"a.ts"}</tool_call><parameter ',
       "<parameter>value</parameter>",
       '<function name="read"><parameter name="path">a.ts</parameter></function>',

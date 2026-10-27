@@ -25,7 +25,7 @@ export function toolCallXmlTextFilter(
   return {
     transform: (text) => stripToolCallXmlTagsInternal(text, options, streaming),
     create: () => {
-      let scannedThrough = 0;
+      let scanTail = "";
       let active = false;
       let codeRegions: ReturnType<typeof findCodeRegions> | undefined;
       const protectionScan = createProtectionScanState();
@@ -38,11 +38,15 @@ export function toolCallXmlTextFilter(
         appendSafe: false,
         resolveCodeOwnership: findCodeOwnership,
       };
+      let transformed = false;
       const transform = (text: string) => {
+        transformed = true;
         codeRegions = undefined;
         projection = { appendSafe: false, resolveCodeOwnership: findCodeOwnership };
         if (heldPrefix !== undefined) {
-          return text.slice(0, heldPrefix);
+          // The caller hides the unfinished tag; returning `text` keeps whole-reply
+          // prefix comparisons out of the per-delta path.
+          return text;
         }
         ownership = /[`~\t]| {4}/u.test(text) ? findCodeOwnership(text) : undefined;
         sourceTail = text.slice(-4);
@@ -59,33 +63,40 @@ export function toolCallXmlTextFilter(
         heldPrefix = undefined;
         const appended = delta ?? text;
         advanceProtectionScanState(protectionScan, appended);
-        if (scannedThrough === text.length - appended.length && !appended.includes("<")) {
-          scannedThrough = text.length;
+        if (delta !== null && scanTail === "" && !appended.includes("<")) {
           return false;
         }
+        // Scan carried bytes plus the append instead of the whole reply; searching the
+        // accumulated string here would copy it once per delta on non-flat ropes.
+        const window = delta === null ? text : scanTail + appended;
+        const windowStart = text.length - window.length;
         let deferredStart: number | undefined;
-        for (let start = text.indexOf("<", scannedThrough); start !== -1;) {
-          const next = text.indexOf("<", start + 1);
-          const candidate = text.slice(start, next === -1 ? text.length : next);
+        for (let relative = window.indexOf("<"); relative !== -1;) {
+          const nextRelative = window.indexOf("<", relative + 1);
+          const start = windowStart + relative;
+          const candidate = window.slice(
+            relative,
+            nextRelative === -1 ? window.length : nextRelative,
+          );
           // Markdown ownership can only matter for a candidate that could begin a
           // tool-call tag; ordinary markup must not re-parse the whole reply.
           const quickCandidate = TOOL_CALL_QUICK_RE.test(candidate);
           const prefixCandidate = isToolCallTagPrefix(candidate, 0);
           if (quickCandidate || prefixCandidate) {
             const onCurrentLine = candidate.length <= protectionScan.partialLine.length;
-            if (next === -1 && onCurrentLine && prefixCandidate && !quickCandidate) {
+            if (nextRelative === -1 && onCurrentLine && prefixCandidate && !quickCandidate) {
               // Only the unfinished candidate line can be classified from the carried tail.
               const completed = { ...protectionScan };
               advanceProtectionScanState(completed, "\n");
               if (!completed.paragraphAmbiguous && !completed.structuralUnknown) {
                 if (completed.fenceChar) {
                   deferredStart = start;
-                  start = next;
+                  relative = nextRelative;
                   continue;
                 }
                 if (streaming) {
                   heldPrefix = start;
-                  scannedThrough = start;
+                  scanTail = window.slice(relative);
                   return true;
                 }
               }
@@ -122,19 +133,82 @@ export function toolCallXmlTextFilter(
               return true;
             }
             if (!protectedBlock && prefixCandidate) {
-              scannedThrough = start;
+              scanTail = window.slice(relative);
               return true;
             }
           }
-          start = next;
+          relative = nextRelative;
         }
-        scannedThrough = deferredStart ?? text.length;
+        scanTail = deferredStart === undefined ? "" : window.slice(deferredStart - windowStart);
         codeRegions = undefined;
         return false;
       });
+      let releasedHold = false;
+      let withheld = "";
+      // Published text is a source prefix and `withheld` carries the rest only while
+      // no earlier transform has suppressed bytes.
+      let synced = true;
       return (input) => {
         if (!active) {
+          transformed = false;
           const result = project(input);
+          if (heldPrefix !== undefined) {
+            // Keep the visible prefix incremental: slicing the accumulated reply here
+            // would still copy it once per delta.
+            if (input.delta === null) {
+              const text = input.text.slice(0, heldPrefix);
+              source = input.text;
+              output = text;
+              // A replacement can end at the held tag; carry its suffix like an append.
+              withheld = input.text.slice(heldPrefix);
+              synced = true;
+              releasedHold = true;
+              return { text, delta: null };
+            }
+            if (!synced) {
+              // A transform rewrote earlier text; resynchronize from the source once,
+              // then the incremental prefix path is valid again.
+              const text = input.text.slice(0, heldPrefix);
+              const delta = text.startsWith(output) ? text.slice(output.length) : null;
+              source = input.text;
+              output = text;
+              withheld = input.text.slice(heldPrefix);
+              synced = true;
+              releasedHold = true;
+              return { text, delta };
+            }
+            const appendStart = input.text.length - input.delta.length;
+            const pending = withheld + input.delta;
+            const visibleLength =
+              heldPrefix > appendStart ? Math.max(0, heldPrefix - output.length) : 0;
+            const visible = pending.slice(0, visibleLength);
+            withheld = pending.slice(visible.length);
+            output += visible;
+            source = input.text;
+            releasedHold = true;
+            return { text: output, delta: visible };
+          }
+          if (releasedHold && input.delta !== null) {
+            const text = result.text;
+            const pending = withheld + input.delta;
+            // Without a transform the appended source is exactly the published prefix
+            // plus the pending bytes; anything else must prove its prefix first.
+            const delta =
+              !transformed && synced
+                ? pending
+                : text.length >= output.length && text.startsWith(output)
+                  ? text.slice(output.length)
+                  : null;
+            source = input.text;
+            output = text;
+            withheld = "";
+            synced = !transformed;
+            releasedHold = false;
+            return { text, delta, ...(result.retained ? { retained: result.retained } : {}) };
+          }
+          withheld = "";
+          releasedHold = false;
+          synced = !transformed;
           source = input.text;
           output = result.text;
           return result;
