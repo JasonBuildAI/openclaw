@@ -7,7 +7,7 @@ import {
   resolveAssistantMessagePhase,
 } from "../shared/chat-message-content.js";
 import {
-  readPlainTextToolCallSettlement,
+  hasUnsettledPlainTextToolCall,
   toolCallXmlTextFilter,
 } from "../shared/text/assistant-visible-text.js";
 import { downgradedToolCallTextFilter } from "../shared/text/downgraded-tool-call-text.js";
@@ -453,8 +453,11 @@ export function handleMessageUpdate(
     });
   }
   if (next !== undefined) {
-    // Held fence fragments change this delta before the visible projection trims it.
-    const unchangedBlockAppend = textIsAppend && visibleDelta === chunk;
+    // A prior projection can hold bytes that this append must restore through a snapshot.
+    const unchangedBlockAppend =
+      textIsAppend &&
+      visibleDelta === chunk &&
+      ctx.state.assistantStream?.projection?.projector.matchesTrimmedSource !== false;
     if (!hasSnapshotText) {
       const kind =
         deliveryPhase !== "final_answer"
@@ -549,6 +552,7 @@ export function handleMessageUpdate(
       (priorBlockIndex === streamContentIndex ||
         (priorBlockIndex === undefined && !priorBlockText)) &&
       projection?.projector.matchesTrimmedSource &&
+      (previousText.length > 0 || appendDelta === chunk) &&
       ((previousText === previousCleaned && next === cleanedText) ||
         (appendDelta !== null && replyDelta === appendDelta));
     // Block snapshots only serve the optional block-delivery consumer.
@@ -613,29 +617,18 @@ export function handleMessageUpdate(
     return undefined;
   }
   if (ctx.params.onBlockReply && ctx.blockChunking) {
-    // A trailing plain-text call candidate can still become a hidden call. Drained block
-    // replies are delivered chat messages that cannot be retracted, so hold them until the
-    // canonical grammar settles the candidate; partial replies keep their replacement path.
-    const buffered = ctx.blockChunker.bufferedText;
-    const previous = ctx.state.blockReplyToolCallHold;
-    // An open JSON payload can settle only on a structural terminator, so ordinary payload
-    // appends reuse the held verdict instead of rescanning the growing candidate. A backtick
-    // is the exception: it can open or close a Markdown code span, which changes whether the
-    // tail is protected literal text or a live candidate, so it invalidates the cache too.
-    const maySettle = /[}\]<>\r\n`]/u.test(chunk);
-    const unchangedOpenPayload =
-      chunk.length > 0 &&
+    // Delivered messages cannot retract mutable Markdown or tool-call prefixes. The
+    // projection owns settlement after activation; the raw grammar covers short prefixes.
+    const projector = projection?.projector;
+    const unsettled =
+      deliveryPhase === "final_answer" &&
       !finalText &&
-      !maySettle &&
-      previous !== undefined &&
-      previous.unsettled &&
-      previous.openJsonPayload &&
-      buffered.length >= previous.length;
-    const settlement = unchangedOpenPayload
-      ? { unsettled: true, openJsonPayload: true }
-      : readPlainTextToolCallSettlement(buffered);
-    ctx.state.blockReplyToolCallHold = { length: buffered.length, ...settlement };
-    if (finalText || !settlement.unsettled) {
+      ((projector
+        ? projector.settledLength < projector.text.length
+        : ctx.state.blockReplyTextUnsettled) ||
+        hasUnsettledPlainTextToolCall(ctx.blockChunker.bufferedText));
+    ctx.state.blockReplyTextUnsettled = unsettled;
+    if (!unsettled) {
       ctx.blockChunker.drain({ force: false, emit: ctx.emitBlockChunk });
     }
   }

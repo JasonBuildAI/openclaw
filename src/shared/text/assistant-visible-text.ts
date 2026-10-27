@@ -244,20 +244,16 @@ export const plainToolCallTextFilter: TextFilter = {
  * Settlement of a plain-text tool-call candidate at the end of visible text. Streaming may
  * publish that tail and retract it later through a replacement, but block replies
  * (already-delivered chat messages) cannot be retracted, so their drain waits until the
- * candidate settles. `openJsonPayload` marks the common unfinished-JSON case, where only a
- * structural terminator can change the answer.
+ * candidate settles.
  */
-export function readPlainTextToolCallSettlement(text: string): {
-  unsettled: boolean;
-  openJsonPayload: boolean;
-} {
+export function hasUnsettledPlainTextToolCall(text: string): boolean {
   if (!text) {
-    return { unsettled: false, openJsonPayload: false };
+    return false;
   }
   const projected = projectPlainTextToolCallBlocks(text, {
     resolveProtectedRanges: findCodeRegions,
   });
-  return { unsettled: projected.unsettled, openJsonPayload: projected.openJsonPayload };
+  return projected.unsettled;
 }
 
 export function sanitizeAssistantVisibleTextWithProfile(

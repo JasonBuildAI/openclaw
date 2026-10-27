@@ -576,8 +576,6 @@ export function projectPlainTextToolCallBlocks(
   retainStart: number;
   retainedOutputStart: number;
   unsettled: boolean;
-  /** True only when the retained tail is an unfinished JSON payload prefix. */
-  openJsonPayload: boolean;
 } {
   let protectedRanges: ReturnType<PlainTextToolCallProtectedRangeResolver> | undefined;
   const isProtected = (offset: number) =>
@@ -627,11 +625,6 @@ export function projectPlainTextToolCallBlocks(
         retainStart,
         retainedOutputStart,
         unsettled: true,
-        openJsonPayload:
-          scan.kind === "prefix" &&
-          scan.payloadStart !== undefined &&
-          scan.json.kind === "prefix" &&
-          scan.json.candidate?.payload !== undefined,
       };
     }
     result += text.slice(cursor, index);
@@ -671,6 +664,5 @@ export function projectPlainTextToolCallBlocks(
     retainStart,
     retainedOutputStart,
     unsettled: pending,
-    openJsonPayload: false,
   };
 }
