@@ -101,26 +101,67 @@ function emitOrphanedVoice(emit: (event: unknown) => void) {
   });
 }
 
-it("delivers intact graphemes from 1-character provider deltas", async () => {
-  const cluster = "👨‍👩‍👧‍👦";
-  const source = `${"x".repeat(1195)}${cluster}done`;
+it.each([
+  { name: "graphemes", source: `${"x".repeat(1195)}👨‍👩‍👧‍👦done`, minChars: 800, maxChars: 1200 },
+  { name: "empty tool payloads", source: "[tool:read] {}\n[tool:read] {}\n", hidden: true },
+  {
+    name: "write payloads",
+    source:
+      '[tool:write]\n{"path":"notes.txt","content":"SECRET CONTENT"}\n[tool:read]\n{"path":"b"}\n',
+    hidden: true,
+  },
+  {
+    name: "literal inline code",
+    source:
+      '`\n[tool:write]\n{"content":"a` This literal example stays visible and keeps streaming as ordinary block replies without any structural terminator.',
+    minChars: 64,
+    maxChars: 128,
+    visible: ["ordinary block replies"],
+    beforeEnd: true,
+  },
+  {
+    name: "next message after an unfinished hold",
+    source: "Hello there, this is visible prose without newlines",
+    prefix: "[a]\n{",
+    visible: ["Hello there"],
+    beforeEnd: true,
+  },
+])("streams $name at the block-delivery boundary", async (test) => {
+  const { minChars = 8, maxChars = 24 } = test;
   const { emit, subscription, onBlockReply } = blockReplyHarness({
     blockReplyBreak: "text_end",
-    blockReplyChunking: { minChars: 800, maxChars: 1200, breakPreference: "paragraph" },
+    blockReplyChunking: { minChars, maxChars, breakPreference: "paragraph" },
   });
-  let text = "";
-  for (const delta of Array.from(source)) {
-    text += delta;
-    emitResponsesText(emit, "text_delta", text, "grapheme-answer", delta);
+  if (test.prefix) {
+    emitMessage(emit, "message_start");
+    emitResponsesText(emit, "text_delta", test.prefix, "prior");
+    emitResponsesText(emit, "text_end", test.prefix, "prior");
+    emitMessage(emit, "message_end", textAssistant(test.prefix));
+    await subscription.waitForPendingEvents();
+    onBlockReply.mockClear();
   }
-  emitResponsesText(emit, "text_end", source, "grapheme-answer");
+  emitMessage(emit, "message_start");
+  let text = "";
+  for (const delta of Array.from(test.source)) {
+    text += delta;
+    emitResponsesText(emit, "text_delta", text, "answer", delta);
+  }
+  const chunks = () => onBlockReply.mock.calls.map(([reply]) => reply.text ?? "");
+  await subscription.waitForPendingEvents();
+  if (test.beforeEnd)
+    expect(chunks().join("").replace(/\s/gu, "")).toContain(test.visible![0].replace(/\s/gu, ""));
+  emitResponsesText(emit, "text_end", test.source, "answer");
   emit({ type: "agent_end", messages: [], willRetry: false });
   await subscription.waitForPendingEvents();
-  const chunks = onBlockReply.mock.calls.map(([reply]) => reply.text ?? "");
-  expect(chunks.length).toBeGreaterThan(1);
-  expect(chunks.join("")).toBe(source);
-  expect(chunks.filter((chunk) => chunk.includes(cluster))).toHaveLength(1);
-  expect(chunks.every((chunk) => chunk.length <= 1200)).toBe(true);
+  if (test.hidden) expect(chunks()).toEqual([]);
+  for (const visible of test.visible ?? [])
+    expect(chunks().join("").replace(/\s/gu, "")).toContain(visible.replace(/\s/gu, ""));
+  if (test.name === "graphemes") {
+    expect(chunks().length).toBeGreaterThan(1);
+    expect(chunks().join("")).toBe(test.source);
+    expect(chunks().filter((chunk) => chunk.includes("👨‍👩‍👧‍👦"))).toHaveLength(1);
+    expect(chunks().every((chunk) => chunk.length <= maxChars)).toBe(true);
+  }
 });
 
 function createAgentEventHarness(
@@ -146,14 +187,6 @@ function createToolErrorHarness(runId: string) {
 
 function emitAssistantTextDelta(emit: (evt: unknown) => void, delta: string) {
   emitUpdate(emit, { role: "assistant" }, { type: "text_delta", delta });
-}
-
-function emitThinkingEvent(
-  emit: (evt: unknown) => void,
-  thinking: string,
-  assistantMessageEvent: { type: "thinking_delta"; delta: string } | { type: "thinking_end" },
-) {
-  emitUpdate(emit, thinkingMessage(thinking), assistantMessageEvent);
 }
 
 async function createGeneratedImageHarness(
@@ -373,7 +406,10 @@ it.each([false, true])("gates off-mode reasoning streaming with opt-in=%s", (ena
     streamReasoningInNonStreamModes: enabled,
     onReasoningStream,
   });
-  emitThinkingEvent(emit, "Checking files", { type: "thinking_delta", delta: "Checking files" });
+  emitUpdate(emit, thinkingMessage("Checking files"), {
+    type: "thinking_delta",
+    delta: "Checking files",
+  });
   if (enabled) {
     expect(onReasoningStream).toHaveBeenCalledWith({
       text: "Checking files",
@@ -426,7 +462,7 @@ it("emits reasoning end once when native and tagged reasoning end overlap", () =
   });
   emitMessage(emit, "message_start");
   emitAssistantTextDelta(emit, "<think>Checking");
-  emitThinkingEvent(emit, "Checking", { type: "thinking_end" });
+  emitUpdate(emit, thinkingMessage("Checking"), { type: "thinking_end" });
   emitAssistantTextDelta(emit, " files</think>\nFinal answer");
   expect(onReasoningEnd).toHaveBeenCalledTimes(1);
 });
