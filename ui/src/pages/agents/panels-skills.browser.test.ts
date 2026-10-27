@@ -73,6 +73,29 @@ function mountSkills(skills: SkillStatusEntry[], overrides: Partial<Params> = {}
 }
 
 describe("agents skills panel (browser)", () => {
+  it("retains cached skill rows and the search control when the initial read settles", async () => {
+    const pending = deferred<SkillStatusReport>();
+    const container = document.createElement("div");
+    const params = skillsParams(
+      [createSkill({ name: "Cached first" }), createSkill({ name: "Cached second" })],
+      { agentSkillsRead: { agentId: "main", result: pending.promise } },
+    );
+    mountSolid(AgentSkills, params, container);
+    await waitForSolid(() => {
+      expect(container.querySelectorAll(".agent-skill-row")).toHaveLength(2);
+      expect(container.textContent).toContain("Loading");
+    });
+    const rows = [...container.querySelectorAll(".agent-skill-row")];
+    const filter = container.querySelector("input[name=agent-skills-filter]");
+
+    pending.resolve(structuredClone(params.agentSkillsReport!));
+    await waitForSolid(() => expect(container.textContent).not.toContain("Loading"));
+    const currentRows = [...container.querySelectorAll(".agent-skill-row")];
+    expect(currentRows).toHaveLength(rows.length);
+    rows.forEach((row, index) => expect(currentRows[index]).toBe(row));
+    expect(container.querySelector("input[name=agent-skills-filter]")).toBe(filter);
+  });
+
   it("retains skill rows and diagnostics when a refresh returns new snapshots", async () => {
     const view = mountSkills([
       createSkill({
@@ -264,17 +287,47 @@ describe("agents skills panel (browser)", () => {
     },
   );
 
-  it("keeps cached skills when a reload returns no report", async () => {
-    const pending = deferred<SkillStatusReport | undefined>();
-    const view = mountSkills([createSkill({ name: "Synthetic cached skill" })], {
-      agentSkillsRead: { agentId: "main", result: pending.promise },
-    });
-    await view.text(["Loading"]);
-    pending.resolve(undefined);
-    await view.text(["Synthetic cached skill"], ["Loading"]);
-  });
+  it.each(["cached", "uncached"])(
+    "settles an initially %s read when no report is returned",
+    async (cacheState) => {
+      const pending = deferred<SkillStatusReport | undefined>();
+      const container = document.createElement("div");
+      const cached = cacheState === "cached";
+      const params = skillsParams([createSkill({ name: "Synthetic cached skill" })], {
+        ...(!cached ? { agentSkillsReport: null, agentSkillsAgentId: null } : {}),
+        agentSkillsRead: { agentId: "main", result: pending.promise },
+      });
+      mountSolid(AgentSkills, params, container);
+      const button = (label: string) =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+          (element) => element.textContent === label,
+        );
+      await waitForSolid(() => {
+        expect(button("Loading…")?.disabled).toBe(true);
+        expect(container.querySelectorAll(".agent-skill-row")).toHaveLength(cached ? 1 : 0);
+        expect(container.textContent).not.toContain("Load skills for this agent");
+      });
+      const rows = [...container.querySelectorAll(".agent-skill-row")];
+      const filter = container.querySelector("input[name=agent-skills-filter]");
 
-  it("shows matches from default-collapsed groups while filtering", async () => {
+      pending.resolve(undefined);
+      await waitForSolid(() => {
+        expect(button("Loading…")).toBeUndefined();
+        expect(button("Refresh")?.disabled).toBe(false);
+        expect(container.querySelectorAll(".agent-skill-row")).toHaveLength(cached ? 1 : 0);
+        if (cached) {
+          expect(container.textContent).toContain("Synthetic cached skill");
+        } else {
+          expect(container.textContent).toContain("Load skills for this agent");
+        }
+      });
+      const currentRows = [...container.querySelectorAll(".agent-skill-row")];
+      rows.forEach((row, index) => expect(currentRows[index]).toBe(row));
+      expect(container.querySelector("input[name=agent-skills-filter]")).toBe(filter);
+    },
+  );
+
+  it("retains matching controls while filtering and restores removed skills after clearing", async () => {
     const view = mountSkills([
       createSkill({ name: "Unique Built In Match", source: "openclaw-bundled", bundled: true }),
       createSkill({ name: "Installed Distractor", source: "openclaw-managed" }),
@@ -283,15 +336,79 @@ describe("agents skills panel (browser)", () => {
     await waitForSolid(() =>
       expect(container.querySelector<HTMLDetailsElement>(".agent-skills-group")?.open).toBe(false),
     );
+    const matchedRow = view.rows()[0]!;
+    const matchedControl = matchedRow.querySelector("input");
+    const filter = view.filter();
+
+    view.update({ ...params, filter: "Unique" });
+    await waitForSolid(() => expect(view.rows()).toHaveLength(1));
+    const filteredGroup = container.querySelector<HTMLDetailsElement>(".agent-skills-group");
+    expect(filteredGroup?.open).toBe(true);
+    expect(view.rows()[0]).toBe(matchedRow);
+    expect(matchedRow.querySelector("input")).toBe(matchedControl);
+    expect(container.textContent).not.toContain("Installed Distractor");
 
     view.update({ ...params, filter: "Unique Built In Match" });
     await waitForSolid(() => expect(container.textContent).toContain("1 shown"));
-    const filteredGroup = container.querySelector<HTMLDetailsElement>(".agent-skills-group");
-    expect(filteredGroup?.open).toBe(true);
-    expect(filteredGroup?.querySelector(".agent-skill-row")?.textContent).toContain(
-      "Unique Built In Match",
-    );
+    expect(view.rows()[0]).toBe(matchedRow);
+    expect(view.filter()).toBe(filter);
+
+    view.update({ ...params, filter: "No matching skill" });
+    await waitForSolid(() => expect(container.textContent).toContain("0 shown"));
+    expect(view.rows()).toHaveLength(0);
+    expect(container.querySelectorAll(".agent-skills-group")).toHaveLength(0);
+    expect(view.filter()).toBe(filter);
+
+    view.update({ ...params, filter: "" });
+    await waitForSolid(() => expect(view.rows()).toHaveLength(2));
+    expect(container.textContent).toContain("Unique Built In Match");
+    expect(container.textContent).toContain("Installed Distractor");
+    expect(view.checked()).toEqual([true, true]);
+    expect(view.filter()).toBe(filter);
   });
+
+  it.each(["initial", "agent", "connection"])(
+    "only mounts matching controls when the %s scope starts filtered",
+    async (scope) => {
+      const view = mountSkills(
+        [
+          createSkill({ name: "Matching skill", source: "openclaw-managed" }),
+          createSkill({ name: "Unrelated skill", source: "openclaw-managed" }),
+        ],
+        { filter: scope === "initial" ? "Matching" : "" },
+      );
+      const { container, params } = view;
+      await waitForSolid(() => expect(view.rows()).toHaveLength(scope === "initial" ? 1 : 2));
+      const oldRows = view.rows();
+      const agentId = scope === "agent" ? "research" : "main";
+      const filtered = {
+        ...params,
+        agentId,
+        agentSkillsAgentId: agentId,
+        filter: "Matching",
+        ...(scope === "connection"
+          ? { readData: () => ({ ...params.readData(), requestGeneration: 1 }) }
+          : {}),
+      };
+      view.update(filtered);
+      await waitForSolid(() => {
+        expect(view.rows()).toHaveLength(1);
+        expect(container.querySelectorAll(".agent-skill-row input")).toHaveLength(1);
+        expect(container.textContent).not.toContain("Unrelated skill");
+      });
+      if (scope !== "initial") {
+        expect(oldRows.every((row) => !container.contains(row))).toBe(true);
+      }
+
+      view.update({ ...filtered, filter: "" });
+      await waitForSolid(() => expect(view.rows()).toHaveLength(2));
+      view.update(filtered);
+      await waitForSolid(() => {
+        expect(view.rows()).toHaveLength(1);
+        expect(container.textContent).not.toContain("Unrelated skill");
+      });
+    },
+  );
 
   it("retires optimistic reset presentation when the selected agent changes", async () => {
     const completion = deferred();

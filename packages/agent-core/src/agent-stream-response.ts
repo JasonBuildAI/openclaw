@@ -1,4 +1,5 @@
 import { isResponsesOutputLimitToolCallError } from "@openclaw/ai/diagnostics";
+import { prepareSystemPrompt } from "@openclaw/ai/internal/shared";
 import {
   createEmptyTransportUsage,
   replaceCompactionReplayOwnerContent,
@@ -8,7 +9,12 @@ import {
   PROVIDER_FAILURE_WITH_OUTPUT_ERROR_CODE,
   REPETITIVE_OUTPUT_ERROR_CODE,
 } from "@openclaw/llm-core";
-import type { AssistantMessage, Context, ToolResultMessage } from "@openclaw/llm-core";
+import type {
+  AssistantMessage,
+  AssistantMessageEvent,
+  Context,
+  ToolResultMessage,
+} from "@openclaw/llm-core";
 import { AssistantRepetitionGuard } from "./assistant-repetition-guard.js";
 import { REPETITIVE_OUTPUT_ERROR_MESSAGE } from "./errors.js";
 import { uuidv7 } from "./harness/session/uuid.js";
@@ -187,8 +193,13 @@ export async function streamAgentResponse(
   const llmMessages = await convertMessages(sourceMessages);
   let requestPrefix: string | undefined;
 
+  context.preparedSystemPrompt = prepareSystemPrompt(
+    context.systemPrompt,
+    context.preparedSystemPrompt,
+  );
   const llmContext: Context = {
     systemPrompt: context.systemPrompt,
+    preparedSystemPrompt: context.preparedSystemPrompt,
     messages: llmMessages,
     tools: context.tools,
   };
@@ -339,6 +350,26 @@ export async function streamAgentResponse(
           await emit({ type: "message_end", message });
         };
 
+        function projectEvent(
+          event: Extract<AssistantMessageEvent, { contentIndex: number }>,
+          fragment: AssistantMessage,
+          completedToolCall: boolean,
+        ) {
+          // Keep completion events isolated: their original fields govern admission after emit.
+          if (
+            committedContentCount === 0 &&
+            !completedToolCall &&
+            (!("partial" in event) || event.partial === fragment)
+          ) {
+            return event;
+          }
+          const projected = { ...event, contentIndex: event.contentIndex - committedContentCount };
+          if ("partial" in event) {
+            projected.partial = fragment;
+          }
+          return projected;
+        }
+
         for await (const event of response) {
           switch (event.type) {
             case "start": {
@@ -401,20 +432,19 @@ export async function streamAgentResponse(
                 } else {
                   context.messages[partialIndex] = fragment;
                 }
-                const fragmentEvent = {
-                  ...event,
-                  contentIndex: event.contentIndex - committedContentCount,
-                };
-                if ("partial" in event) {
-                  fragmentEvent.partial = fragment;
-                }
+                const completedToolCall = event.type === "toolcall_end";
+                const fragmentEvent = projectEvent(event, fragment, completedToolCall);
                 await emit({
                   type: "message_update",
                   assistantMessageEvent: fragmentEvent,
-                  message: { ...fragment },
+                  // Partial-free text already has a fresh envelope; providers still own snapshots.
+                  message:
+                    event.type === "text_delta" && !event.partial
+                      ? Object.freeze(fragment)
+                      : { ...fragment },
                 });
                 if (
-                  event.type === "toolcall_end" &&
+                  completedToolCall &&
                   event.toolCall.async &&
                   !executedIds.has(event.toolCall.id) &&
                   message.content
