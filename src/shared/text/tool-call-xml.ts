@@ -152,25 +152,18 @@ export function toolCallXmlTextFilter(
         if (!active) {
           transformed = false;
           const result = project(input);
+          source = input.text;
           if (heldPrefix !== undefined) {
-            // Keep the visible prefix incremental: slicing the accumulated reply here
-            // would still copy it once per delta.
-            if (input.delta === null) {
+            // Replacements and earlier transforms resynchronize once before the
+            // incremental prefix path can resume, including the withheld suffix.
+            if (input.delta === null || !synced) {
               const text = input.text.slice(0, heldPrefix);
-              source = input.text;
-              output = text;
-              // A replacement can end at the held tag; carry its suffix like an append.
-              withheld = input.text.slice(heldPrefix);
-              synced = true;
-              releasedHold = true;
-              return { text, delta: null };
-            }
-            if (!synced) {
-              // A transform rewrote earlier text; resynchronize from the source once,
-              // then the incremental prefix path is valid again.
-              const text = input.text.slice(0, heldPrefix);
-              const delta = text.startsWith(output) ? text.slice(output.length) : null;
-              source = input.text;
+              const delta =
+                input.delta === null
+                  ? null
+                  : text.startsWith(output)
+                    ? text.slice(output.length)
+                    : null;
               output = text;
               withheld = input.text.slice(heldPrefix);
               synced = true;
@@ -184,7 +177,6 @@ export function toolCallXmlTextFilter(
             const visible = pending.slice(0, visibleLength);
             withheld = pending.slice(visible.length);
             output += visible;
-            source = input.text;
             releasedHold = true;
             return { text: output, delta: visible };
           }
@@ -199,7 +191,6 @@ export function toolCallXmlTextFilter(
                 : text.length >= output.length && text.startsWith(output)
                   ? text.slice(output.length)
                   : null;
-            source = input.text;
             output = text;
             withheld = "";
             synced = !transformed;
@@ -209,7 +200,6 @@ export function toolCallXmlTextFilter(
           withheld = "";
           releasedHold = false;
           synced = !transformed;
-          source = input.text;
           output = result.text;
           return result;
         }

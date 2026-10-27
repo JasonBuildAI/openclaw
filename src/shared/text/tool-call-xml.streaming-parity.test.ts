@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { userFacingTextFilters } from "../../agents/embedded-agent-helpers/sanitize-user-facing-text.js";
+import {
+  createAssistantVisibleStreamText,
+  sanitizeAssistantVisibleStreamText,
+} from "../../agents/embedded-agent-utils.js";
 import { assistantVisibleTextFilters } from "./assistant-visible-text.js";
+import { expectPrefixParity } from "./streaming.test-support.js";
 import {
   applyTextFilters,
   createTextProjection,
@@ -127,4 +132,53 @@ it.each([
   for (const streaming of [false, true]) {
     expect(toolCallXmlTextFilter({}, streaming).transform(source)).toBe(expected);
   }
+});
+
+const partialTagDeliveries = [
+  ["HTML", "<details><summary>Result</summary><p>ordinary text</p></details>"],
+  ["JSX", "<div>{items.length < 3 ? <b>Few</b> : <i>Many</i>}</div>"],
+  ["literal comparison", "a < b and x > y; the identifier is <tool_."],
+  ["resynchronization", "<\n\na\n\n<"],
+  ["resynchronization before a fence", "<`</f\n\n<```"],
+  ["adjacent partial tags", "<p<p"],
+  ["hidden reasoning before HTML", "<think>synthetic private reasoning</think><p>visible</p>"],
+  [
+    "stripped memories before a partial tag",
+    "<relevant-memories>synthetic private memory</relevant-memories>\n<p",
+  ],
+  ["tool call after a partial tag", `<p${call}`],
+  ["partial tag after a tool call", `${call}<p`],
+  ["fenced call followed by HTML", `\`\`\`xml\n${call}\n\`\`\`\n\n<p>visible</p>`],
+  ["inline call followed by HTML", `Example \`${call}\`; <p>visible</p>`],
+  ["indented partial tag", "Before.\n\n    <p"],
+  ["quoted partial tag", "> Before.\n> <p"],
+  ["late image ownership", `![example \`x\n${call}\nx\`][id]\n\n[id]: /url\n`],
+  ["CRLF fence", `\`\`\`xml\r\n${call}\r\n\`\`\`\r\n<p`],
+] as const;
+
+it.each(partialTagDeliveries)(
+  "preserves full delivery parity across every split: %s",
+  (_name, source) => {
+    expectPrefixParity(
+      source,
+      () => createAssistantVisibleStreamText("final_answer"),
+      (text) => sanitizeAssistantVisibleStreamText(text, "final_answer"),
+    );
+  },
+);
+
+it.each([
+  ["<script>    <", "b"],
+  ["After <a", ' href="/x">link</a>'],
+  ["<\n\na\n\n<", "p>visible</p>"],
+])("preserves full delivery parity after a replacement ending in %j", (prefix, tail) => {
+  const stream = createAssistantVisibleStreamText("final_answer");
+  stream.append("Discarded draft.");
+  const replaced = stream.replace(prefix);
+  expect(replaced.text).toBe(sanitizeAssistantVisibleStreamText(prefix, "final_answer"));
+  const appended = stream.append(tail);
+  const delivered = appended.delta === null ? appended.text : replaced.text + appended.delta;
+  const expected = sanitizeAssistantVisibleStreamText(prefix + tail, "final_answer");
+  expect(appended.text).toBe(expected);
+  expect(delivered).toBe(expected);
 });
