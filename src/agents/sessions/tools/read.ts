@@ -36,14 +36,14 @@ import {
   withFileMutationQueueKeysResolution,
 } from "./file-mutation-queue.js";
 import { assertFileToolNotAborted } from "./file-tool-abort.js";
-import { normalizePositiveLimit } from "./limits.js";
+import { normalizePositiveLimit, READ_SOURCE_MAX_BYTES } from "./limits.js";
 import {
   getReadPathVariants,
   getReadQueuePaths,
   resolveLocalPathToCwd,
   resolveToCwd,
 } from "./path-utils.js";
-import { readLocalFile } from "./read-file.js";
+import { readLocalFile, readLocalFileSource, type LocalFileSource } from "./read-file.js";
 import { createBoundedReadTextPage } from "./read-page.js";
 import type { ReadToolDetails } from "./tool-contracts.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -154,6 +154,12 @@ interface ReadOperations {
   /** Decode text bytes for this backend. Custom backends default to UTF-8. */
   decodeText?: (params: { buffer: Buffer; absolutePath: string }) => string;
   readFile: (absolutePath: string, signal?: AbortSignal) => Promise<Buffer>;
+  /** Read a bounded source snapshot; absent backends keep their unbounded readFile. */
+  readSource?: (
+    absolutePath: string,
+    signal: AbortSignal | undefined,
+    maxBytes: number,
+  ) => Promise<LocalFileSource>;
   /** Check if file is readable (throw if not) */
   access: (absolutePath: string) => Promise<void>;
   /** Detect image MIME type, return null or undefined for non-images */
@@ -167,6 +173,7 @@ const defaultReadOperations: ReadOperations = {
   resolvePath: resolveLocalReadPath,
   decodeText: ({ buffer }) => decodeWindowsTextFileBuffer({ buffer }),
   readFile: readLocalFile,
+  readSource: readLocalFileSource,
   access: assertLocalReadableFile,
 };
 
@@ -448,6 +455,8 @@ export function createReadToolDefinition(
             let absolutePath: string;
             let note: string | undefined;
             let buffer: Buffer;
+            let sourceTruncated = false;
+            let sourceSize = 0;
             try {
               // Share write/edit ordering through byte capture only. Decode the
               // immutable snapshot below after releasing the path queue.
@@ -467,13 +476,22 @@ export function createReadToolDefinition(
                   const absoluteInputPath = await inputPathResolution;
                   const resolved = await resolveReadToolPathFromAbsolute(ops, absoluteInputPath);
                   assertFileToolNotAborted(signal);
+                  const source = ops.readSource
+                    ? await ops.readSource(resolved.absolutePath, signal, READ_SOURCE_MAX_BYTES)
+                    : {
+                        buffer: await ops.readFile(resolved.absolutePath, signal),
+                        truncated: false,
+                        size: 0,
+                      };
                   return {
                     ...resolved,
-                    buffer: await ops.readFile(resolved.absolutePath, signal),
+                    buffer: source.buffer,
+                    sourceTruncated: source.truncated,
+                    sourceSize: source.size,
                   };
                 },
               );
-              ({ absolutePath, note, buffer } = snapshot);
+              ({ absolutePath, note, buffer, sourceTruncated, sourceSize } = snapshot);
             } catch (error) {
               if (
                 signal?.aborted ||
@@ -496,6 +514,9 @@ export function createReadToolDefinition(
               ? ops.detectImageMimeType(absolutePath, buffer)
               : detectSupportedImageMimeType(buffer));
             const attachment = mimeType ? undefined : await classifyAttachmentBytes({ buffer });
+            let sourceNote = sourceTruncated
+              ? `File is ${formatSize(sourceSize)}; read shows at most its first ${formatSize(READ_SOURCE_MAX_BYTES)}. Use exec (head, tail, sed -n '<start>,<end>p', rg) for later ranges.`
+              : undefined;
             let content: (TextContent | ImageContent)[];
             let textDetails: Extract<ReadToolDetails, { kind: "text" | "truncated" }> | undefined;
             const modelHasVision = options?.modelHasVision ?? ctx?.model?.input.includes("image");
@@ -511,28 +532,46 @@ export function createReadToolDefinition(
                 },
               ];
             } else if (mimeType) {
-              // Backends may reuse their Buffer while image preparation awaits processing.
-              const imageBytes = Buffer.from(buffer);
-              const processed = await processImage(
-                { data: imageBytes, mimeType },
-                { autoResizeImages },
-              );
-              const notes = processed.ok
-                ? [`Read image file [${processed.image.mimeType}]`, ...processed.hints]
-                : [`Read image file [${mimeType}]`, processed.message];
-              if (nonVisionImageNote) {
-                notes.push(nonVisionImageNote);
-              }
-              content = [{ type: "text", text: notes.join("\n") }];
-              if (processed.ok && !nonVisionImageNote) {
-                content.push(processed.image);
+              if (sourceTruncated) {
+                sourceNote = undefined;
+                content = [
+                  {
+                    type: "text",
+                    text: `Read image file [${mimeType}]; it is ${formatSize(sourceSize)}, above the ${formatSize(READ_SOURCE_MAX_BYTES)} read limit, so the image was not attached.`,
+                  },
+                ];
+              } else {
+                // Backends may reuse their Buffer while image preparation awaits processing.
+                const imageBytes = Buffer.from(buffer);
+                const processed = await processImage(
+                  { data: imageBytes, mimeType },
+                  { autoResizeImages },
+                );
+                const notes = processed.ok
+                  ? [`Read image file [${processed.image.mimeType}]`, ...processed.hints]
+                  : [`Read image file [${mimeType}]`, processed.message];
+                if (nonVisionImageNote) {
+                  notes.push(nonVisionImageNote);
+                }
+                content = [{ type: "text", text: notes.join("\n") }];
+                if (processed.ok && !nonVisionImageNote) {
+                  content.push(processed.image);
+                }
               }
             } else {
               const decodedText =
                 ops.decodeText?.({ buffer, absolutePath }) ?? buffer.toString("utf8");
-              const textContent = (
+              let textContent = (
                 decodedText.startsWith("\uFEFF") ? decodedText.slice(1) : decodedText
               ).replaceAll("\r\n", "\n");
+              if (sourceTruncated) {
+                // The byte boundary can cut a line; keep the whole lines that were read.
+                const lastNewline = textContent.lastIndexOf("\n");
+                if (lastNewline >= 0 && lastNewline < textContent.length - 1) {
+                  textContent = textContent.slice(0, lastNewline + 1);
+                }
+              }
+              const framingNote = [note, sourceNote].filter(Boolean).join("\n");
               const startLine = offset === undefined ? 0 : offset - 1;
               const startLineDisplay = startLine + 1;
               const requestedLines =
@@ -570,7 +609,13 @@ export function createReadToolDefinition(
                     ? "File is empty (0 bytes)."
                     : `File contains no readable text (${buffer.length} bytes).`;
               } else if (startLine >= totalFileLines) {
-                outputText = `Offset ${offset} is beyond end of file (${totalFileLines} lines total). Retry with offset <= ${totalFileLines}.`;
+                if (sourceTruncated) {
+                  // The refusal below already names the window and the alternative.
+                  sourceNote = undefined;
+                }
+                outputText = sourceTruncated
+                  ? `Offset ${offset} is beyond the ${formatSize(READ_SOURCE_MAX_BYTES)} read window (${totalFileLines} lines read from a ${formatSize(sourceSize)} file). Use exec (sed -n '<start>,<end>p', tail) for later ranges.`
+                  : `Offset ${offset} is beyond end of file (${totalFileLines} lines total). Retry with offset <= ${totalFileLines}.`;
               } else if (cursor > 0 && cursor >= firstLineLength) {
                 const nextLine =
                   startLine + 1 < totalFileLines
@@ -589,7 +634,7 @@ export function createReadToolDefinition(
                   selectedStart + cursor,
                   endLine === totalFileLines ? textContent.length : selectedEnd,
                 );
-                const noteBytes = note ? Buffer.byteLength(`${note}\n`, "utf8") : 0;
+                const noteBytes = framingNote ? Buffer.byteLength(`${framingNote}\n`, "utf8") : 0;
                 const page = createBoundedReadTextPage({
                   content: selectedContent,
                   startLine: startLineDisplay,
@@ -599,7 +644,7 @@ export function createReadToolDefinition(
                   limit: userLimitedLines,
                   maxBytes,
                   modelBudget: options?.modelBudget,
-                  prefix: note ? `${note}\n` : undefined,
+                  prefix: framingNote ? `${framingNote}\n` : undefined,
                   pageMaxBytes: Math.min(DEFAULT_MAX_BYTES, maxBytes) - noteBytes,
                   adaptive: options?.maxBytes !== undefined,
                 });
@@ -626,9 +671,10 @@ export function createReadToolDefinition(
               content = [{ type: "text", text: outputText }];
             }
 
-            if (note && content[0]?.type === "text") {
+            const framingNote = [note, sourceNote].filter(Boolean).join("\n");
+            if (framingNote && content[0]?.type === "text") {
               content = [
-                { ...content[0], text: `${note}\n${content[0].text}` },
+                { ...content[0], text: `${framingNote}\n${content[0].text}` },
                 ...content.slice(1),
               ];
             }
