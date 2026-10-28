@@ -400,6 +400,7 @@ const batch = (source: string) =>
 it.each([
   "Use `[TOOL_CALL]` and `[Tool Call: read]` literally.",
   "![alt `[Tool Call: read]`](url)",
+  "[Tool Call: read]```text\n\nordinary paragraph\n\n[Historical context: literal]\n",
   '[link](url "see `[Tool Call: read]` here")',
   '[TOOL_CALL] tool => "read", args => {\n"x": 1}[/TOOL_CALL]\nDone.',
   "[Tool Call: read]\nArguments: {\n}\n[Historical context: hidden]\nDone.",

@@ -69,7 +69,7 @@ function scanDowngradedToolCalls(
   let codeRegions: ReturnType<typeof findCodeRegions> | undefined = protectedRegions;
   let result = "";
   let cursor = 0;
-  let pending = false;
+  let pending = input.lastIndexOf("[") > input.lastIndexOf("]");
   for (const match of input.matchAll(/\[Tool Call:[^\]]*\]/gi)) {
     const start = match.index;
     if (start < cursor || isInsideCode(start, (codeRegions ??= findCodeRegions(input)))) {
@@ -117,45 +117,48 @@ export function stripDowngradedToolCallText(
   if (!text || (!/\[Tool (?:Call|Result)/i.test(text) && !/\[Historical context/i.test(text))) {
     return text;
   }
-  const scan = scanDowngradedToolCallText(text);
-  return trimTextPreservingCode(scan.text, options?.preserveTrailingWhitespace ? "start" : "both");
+  let cleaned = text;
+  for (const scan of downgradedScanners) {
+    cleaned = scan(cleaned).text;
+  }
+  return trimTextPreservingCode(cleaned, options?.preserveTrailingWhitespace ? "start" : "both");
 }
 
-/** Batch-installed text plus whether an append can still change the hidden tail. */
-function scanDowngradedToolCallText(
-  text: string,
+function scanDowngradedPattern(
+  input: string,
+  pattern: RegExp,
+  ownsTail: boolean,
   protectedRegions?: ReturnType<typeof findCodeRegions>,
 ): DowngradedToolCallScan {
-  if (!text || (!/\[Tool (?:Call|Result)/i.test(text) && !/\[Historical context/i.test(text))) {
-    return { text, pending: false };
-  }
-  const scan = scanDowngradedToolCalls(text, protectedRegions);
-  let cleaned = scan.text;
-  let pending = scan.pending || text.lastIndexOf("[") > text.lastIndexOf("]");
-  const patterns = [
-    /\[Tool Result for ID[^\]]*\]\n?[\s\S]*?(?=\n*\[Tool |\n*$)/gi,
-    /\[Historical context:[^\]]*\]\n?/gi,
-  ] as const;
-  for (const [patternIndex, pattern] of patterns.entries()) {
-    const input = cleaned;
-    let codeRegions: ReturnType<typeof findCodeRegions> | undefined =
-      input === text ? protectedRegions : undefined;
-    cleaned = input.replace(pattern, (match, offset: number) => {
-      if (isInsideCode(offset, (codeRegions ??= findCodeRegions(input)))) {
-        return match;
-      }
-      // Without a later tool marker this block owns everything to the end.
-      if (
-        offset + match.length === input.length ||
-        (patternIndex === 0 && !input.slice(offset + match.length).includes("[Tool "))
-      ) {
-        pending = true;
-      }
-      return "";
-    });
-  }
-  return { text: cleaned, pending };
+  let codeRegions = protectedRegions;
+  let pending = input.lastIndexOf("[") > input.lastIndexOf("]");
+  const text = input.replace(pattern, (match, offset: number) => {
+    if (isInsideCode(offset, (codeRegions ??= findCodeRegions(input)))) {
+      return match;
+    }
+    // A result without a later tool marker still owns the streaming tail.
+    pending ||=
+      offset + match.length === input.length ||
+      (ownsTail && !input.slice(offset + match.length).includes("[Tool "));
+    return "";
+  });
+  return { text, pending };
 }
+
+const downgradedScanners: Array<
+  (text: string, regions?: ReturnType<typeof findCodeRegions>) => DowngradedToolCallScan
+> = [
+  scanDowngradedToolCalls,
+  (text, regions) =>
+    scanDowngradedPattern(
+      text,
+      /\[Tool Result for ID[^\]]*\]\n?[\s\S]*?(?=\n*\[Tool |\n*$)/gi,
+      true,
+      regions,
+    ),
+  (text, regions) =>
+    scanDowngradedPattern(text, /\[Historical context:[^\]]*\]\n?/gi, false, regions),
+];
 
 export function downgradedToolCallTextFilter(options?: {
   preserveTrailingWhitespace?: boolean;
@@ -174,21 +177,21 @@ export function downgradedToolCallTextFilter(options?: {
             return input;
           }
           project = createTextProjector([
-            {
+            ...downgradedScanners.map((scan): TextFilter => ({
               activationTokens,
-              transform: (text) => scanDowngradedToolCallText(text).text,
+              transform: (text) => scan(text).text,
               checkpoint(text, boundary, context) {
                 const regions = context.codeRegions();
-                const scan = scanDowngradedToolCallText(text, regions);
-                const prefix = scanDowngradedToolCallText(text.slice(0, boundary), regions);
-                const retainStart = scan.pending || prefix.pending ? 0 : boundary;
+                const result = scan(text, regions);
+                const prefix = scan(text.slice(0, boundary), regions);
+                const retainStart = result.pending || prefix.pending ? 0 : boundary;
                 return {
-                  text: scan.text,
+                  text: result.text,
                   retainStart,
                   retainedOutputStart: retainStart ? prefix.text.length : 0,
                 };
               },
-            },
+            })),
             trimTextFilter(options?.preserveTrailingWhitespace ? "start" : "both", {
               preserveCodeIndentation: true,
             }),
