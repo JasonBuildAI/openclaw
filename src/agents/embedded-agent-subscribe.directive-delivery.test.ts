@@ -548,16 +548,20 @@ it("retains raw XML projection across a source replacement", () => {
 });
 it.each([
   ["", `before${"\n".repeat(60_000)}after`],
-  ...["\r", "\n", "\r\n"].map((eol) => [
-    "MEDIA: ./a.png\nCaption",
-    `${eol}MEDIA: ./b.png${eol}After`,
+  ...["\r", "\n", "\r\n"].flatMap((eol) => [
+    ["MEDIA: ./a.png\nCaption", `${eol}MEDIA: ./b.png${eol}After`],
+    ...["M", "ME", "MED", "MEDI", "MEDIA"].map((marker) => [
+      "MEDIA: ./a.png\nCaption",
+      `${eol}${marker}`,
+      `${"MEDIA".slice(marker.length)}: ./b.png${eol}After`,
+    ]),
   ]),
-])("keeps media boundaries and long blank runs canonical: %j", (prefix, delta) => {
+])("keeps media boundaries and long blank runs canonical: %j", (...chunks: string[]) => {
   const resolve = createStreamingReplyResolver();
   let previousText = "";
   let previousCleaned = "";
   const started = performance.now();
-  for (const visibleDelta of [prefix, delta].filter(Boolean)) {
+  for (const visibleDelta of chunks.filter(Boolean)) {
     const next = previousText + visibleDelta;
     const result = resolve({
       evtType: "text_delta",
@@ -572,7 +576,7 @@ it.each([
     previousText = next;
     previousCleaned = result.text;
   }
-  expect(previousCleaned).toBe(parseReplyDirectives(prefix + delta).text);
+  expect(previousCleaned).toBe(parseReplyDirectives(chunks.join("")).text);
   expect(performance.now() - started).toBeLessThan(1_000);
 });
 it("streams a long reply-tagged answer without a quadratic slowdown", () => {
@@ -581,9 +585,7 @@ it("streams a long reply-tagged answer without a quadratic slowdown", () => {
   const partials: ReplyPayload[] = [];
   const { emit } = createSubscribedSessionHarness({
     runId: "run-tagged-stream",
-    onPartialReply: (payload) => {
-      partials.push(payload);
-    },
+    onPartialReply: (payload) => void partials.push(payload),
   });
   emit({ type: "message_start", message: textMessage("") });
   const started = performance.now();
