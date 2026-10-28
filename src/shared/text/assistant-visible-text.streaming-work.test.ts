@@ -42,17 +42,16 @@ it("keeps a split tool header across an unbounded whitespace gap", () => {
 
 const markdownOwnershipWork = vi.hoisted(() => ({ scannedCharacters: 0 }));
 
-vi.mock("./code-regions.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./code-regions.js")>();
+vi.mock("../../../packages/markdown-core/src/reasoning-tag-parser.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../../../packages/markdown-core/src/reasoning-tag-parser.js")
+    >();
   return {
     ...actual,
-    findCodeRegions(text: string) {
-      markdownOwnershipWork.scannedCharacters += text.length;
-      return actual.findCodeRegions(text);
-    },
-    findCodeOwnership(...args: Parameters<typeof actual.findCodeOwnership>) {
+    parseMarkdownOwnership(...args: Parameters<typeof actual.parseMarkdownOwnership>) {
       markdownOwnershipWork.scannedCharacters += args[0].length;
-      return actual.findCodeOwnership(...args);
+      return actual.parseMarkdownOwnership(...args);
     },
   };
 });
@@ -401,6 +400,7 @@ it.each([
   "Use `[TOOL_CALL]` and `[Tool Call: read]` literally.",
   "![alt `[Tool Call: read]`](url)",
   "[Tool Call: read]```text\n\nordinary paragraph\n\n[Historical context: literal]\n",
+  "[Tool Call: read]> ```text\n> [Historical context: literal]\n\nDone.",
   '[link](url "see `[Tool Call: read]` here")',
   '[TOOL_CALL] tool => "read", args => {\n"x": 1}[/TOOL_CALL]\nDone.',
   "[Tool Call: read]\nArguments: {\n}\n[Historical context: hidden]\nDone.",
@@ -472,7 +472,9 @@ it.each(["fenced", "indented", "lazy", "prefixed", "inline", "paragraph", "legac
         });
         expect([stream.text, delivered]).toEqual([batch(text), batch(text)]);
         // This counts whole-path regexp work, not only placeholder-stage characters.
-        expect(scanned).toBeLessThan(text.length * 192);
+        // Downgraded transcripts retain three independently checkpointed grammar passes.
+        const budget = shape === "downgraded" ? 256 : 192;
+        expect(scanned).toBeLessThan(text.length * budget);
         expect(markdownOwnershipWork.scannedCharacters - before).toBeLessThan(text.length * 32);
         expect(scanned).toBeLessThanOrEqual(previous * 2.25);
         previous = scanned;
