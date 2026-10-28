@@ -266,6 +266,22 @@ it.each([
   expect(markdownOwnershipWork.scannedCharacters - before).toBeLessThan(source.length * 16);
 });
 
+it("bounds Markdown ownership work for repeated inline-code paragraphs", () => {
+  const paragraph =
+    "Routing uses `channelId` and `agentId` so the reply lands in the right conversation and thread.";
+  const source = `${paragraph}\n\n`
+    .repeat(Math.ceil(16_384 / (paragraph.length + 2)))
+    .slice(0, 16_384);
+  const stream = createAssistantVisibleStreamText("final_answer");
+  const before = markdownOwnershipWork.scannedCharacters;
+  streamChunks(source, 4, stream);
+
+  // Inline spans cannot hold a paragraph separator, so the collapsed reply never reparses
+  // its Markdown: 559 full-reply parses before this bound, 0 after.
+  expect(stream.text).toBe(sanitizeAssistantVisibleStreamText(source, "final_answer"));
+  expect(markdownOwnershipWork.scannedCharacters - before).toBeLessThan(source.length * 16);
+});
+
 it.each([
   ["![example `x\n[tool:read] {}\nx` label", "](/url)\n"],
   ['[id]: /url\n"title\n`x\n[tool:read] {}\nx` trailing\n', '"'],

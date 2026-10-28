@@ -101,6 +101,20 @@ export function findTextCheckpoint(
   return { offset: closedFence ? cursor : lastLineStart, context: "" };
 }
 
+// Only a fenced or indented code start can hold a blank line inside code. Single
+// backticks are inline spans and cannot cross a paragraph separator.
+const BLOCK_CODE_START_RE = /`{3,}|~{3,}|\t| {4}/u;
+
+/** True when `source` has block code, which the paragraph splitter must not enter. */
+export function requiresBlockCodeProtection(
+  source: string,
+  tail: string | undefined,
+  appended: string,
+): boolean {
+  const probe = tail === undefined ? source : tail + appended;
+  return BLOCK_CODE_START_RE.test(probe) && findCodeRegions(source).some((region) => region.block);
+}
+
 /** Reuse a parsed prefix only when an append cannot change Markdown ownership. */
 export function canReuseMarkdownOwnership(
   previousText: string,

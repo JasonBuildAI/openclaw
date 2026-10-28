@@ -6,6 +6,7 @@ import {
   findCodeOwnership,
   findCodeRegions,
   findTextCheckpoint,
+  requiresBlockCodeProtection,
 } from "./code-regions.js";
 import { stripLeadingEmptyLines } from "./strip-leading-empty-lines.js";
 import { trimTextPreservingCode } from "./trim-code-text.js";
@@ -650,11 +651,9 @@ function createDuplicateParagraphProjector(protectCode = true): TextProjector {
     const duplicate = Boolean(paragraph) && equal && normalizedLength === lastNormalized?.length;
     const collapsed = hasDuplicate || duplicate;
     if (protectCode && !codeProtectionRequired && (collapsed || codeProbeTail !== undefined)) {
-      // An empty Markdown prefix has no code; retain split four-space indentation.
-      // Once syntax is ambiguous, the canonical transform keeps ownership of it.
-      const probe = codeProbeTail === undefined ? input.text : codeProbeTail + appended;
-      codeProtectionRequired = !canReuseMarkdownOwnership("", probe);
-      codeProbeTail = probe.slice(-3);
+      // An empty Markdown prefix cannot open block code; only block code holds a separator.
+      codeProtectionRequired = requiresBlockCodeProtection(input.text, codeProbeTail, appended);
+      codeProbeTail = input.text.slice(-3);
     }
     let delta = input.delta;
     if (collapsed) {

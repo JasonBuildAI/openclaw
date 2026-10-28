@@ -150,6 +150,7 @@ it.each([
   ["A\r\n\r\nB", "A\r\n\r\nB"],
   ["```text\r\nA\r\n\r\nA\r\n```\r\n\r\nB\r\n\r\nB", "```text\r\nA\r\n\r\nA\r\n```\r\n\r\nB"],
   ["A\n\nA\n\n```\n", "A\n\n```\n"],
+  ["Routing `channelId`\n\nRouting `channelId`", "Routing `channelId`"],
 ])("preserves canonical separators and whitespace %#", (source, expected) => {
   expect(text.duplicateParagraphTextFilter.transform(source)).toBe(expected);
   const partitions = [
@@ -192,4 +193,21 @@ it("keeps code-bearing continuation appends on the incremental suffix path", () 
   }
   expect(parser).toHaveBeenCalledTimes(initialParses);
   expect(projection.text).toBe(text.duplicateParagraphTextFilter.transform(projection.source));
+});
+
+it("keeps inline-code duplicate appends on the incremental suffix path", () => {
+  const parser = vi.mocked(findCodeRegions);
+  parser.mockClear();
+  const paragraph =
+    "Routing uses `channelId` and `agentId` so the reply lands in the right conversation and thread.";
+  const source = `${paragraph}\n\n`.repeat(64);
+  const projection = project(text.duplicateParagraphTextFilter);
+  for (let offset = 0; offset < source.length; offset += 4) {
+    projection.append(source.slice(offset, offset + 4));
+  }
+
+  // An inline span cannot hold a paragraph separator, so block-code protection stays off
+  // and the repeated paragraphs never re-collapse the whole reply.
+  expect(parser).not.toHaveBeenCalled();
+  expect(projection.text).toBe(text.duplicateParagraphTextFilter.transform(source));
 });
