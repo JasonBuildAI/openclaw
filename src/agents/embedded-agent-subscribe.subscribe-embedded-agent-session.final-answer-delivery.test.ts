@@ -168,11 +168,9 @@ describe("Responses final delivery", () => {
         },
         () => secondDelivered.resolve(),
       );
-      await h.subscription.waitForPendingEvents();
+      await h.flush(["Alpha", "Beta"], true);
 
       expect(onAssistantMessageStart).toHaveBeenCalledTimes(2);
-      expect(h.texts()).toEqual(["Alpha", "Beta"]);
-      expect(h.subscription.assistantTexts).toEqual(["Alpha", "Beta"]);
       expect(output.content).toMatchObject([
         { type: "text", text: `Alpha\n\n${citation}` },
         { type: "text", text: "Beta" },
@@ -211,8 +209,7 @@ describe("Responses final delivery", () => {
           partial,
         });
       }
-      await h.subscription.waitForPendingEvents();
-      expect(h.texts()).toEqual(items.slice(0, contentIndex + 1).map(({ text }) => text));
+      await h.flush(items.slice(0, contentIndex + 1).map(({ text }) => text));
     }
     const message = {
       ...base,
@@ -220,9 +217,7 @@ describe("Responses final delivery", () => {
     };
     for (let repeat = 0; repeat < 2; repeat++) {
       h.end(message);
-      await h.subscription.waitForPendingEvents();
-      expect(h.texts()).toEqual(["Alpha", "Beta"]);
-      expect(h.onBlockReply).toHaveBeenCalledTimes(2);
+      await h.flush(["Alpha", "Beta"], false, 2);
     }
   });
 
@@ -346,8 +341,7 @@ describe("Responses final delivery", () => {
     }
     expect(onAgentEvent).not.toHaveBeenCalled();
     h.end(messageAt(texts.length));
-    await h.subscription.waitForPendingEvents();
-    expectSingle(h, "First\nSecond");
+    await h.flush(["First\nSecond"], true, 1);
     expect(onAgentEvent.mock.calls.at(-1)?.[0]).toMatchObject({
       stream: "assistant",
       data: { text: "First\nSecond" },
@@ -365,8 +359,7 @@ describe("terminal visible replies", () => {
     const message = { ...textAssistant(`<final>${encoded}</final>`), api: "openai-completions" };
     h.start(message);
     h.end(message);
-    await h.subscription.waitForPendingEvents();
-    expect(h.texts()).toEqual(["Visible reply."]);
+    await h.flush(["Visible reply."]);
     for (const [payload] of h.onBlockReply.mock.calls) {
       expect(payload.replyToId).toBeUndefined();
       expect(payload.replyToCurrent).toBeFalsy();

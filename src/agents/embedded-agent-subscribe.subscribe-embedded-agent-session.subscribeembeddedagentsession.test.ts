@@ -41,10 +41,6 @@ function emitUpdate(
 }
 
 type SessionOptions = Parameters<typeof createSubscribedSessionHarness>[0];
-function blockReplyHarness(options: Omit<SessionOptions, "runId"> & { runId?: string } = {}) {
-  return createDeliveryHarness({ blockReplyBreak: undefined, ...options });
-}
-
 function emitResponsesText(
   emit: (event: unknown) => void,
   type: "text_delta" | "text_end",
@@ -92,7 +88,21 @@ function completion(source: "music_generation" | "subagent", mediaUrl: string) {
   };
 }
 
-it.each([
+type BlockReplyScenario = {
+  name: string;
+  source: string;
+  expected?: string;
+  chunkSize?: number;
+  maxSnapshots?: number;
+  minChars?: number;
+  maxChars?: number;
+  hidden?: boolean;
+  prefix?: string;
+  visible?: readonly string[];
+  beforeEnd?: string;
+};
+
+it.each<BlockReplyScenario>([
   ...["indented", "lazy"].map((name) => {
     const indent = name === "indented" ? "    " : "";
     const opening = `${name === "lazy" ? "> Command\n" : ""}${indent}(no output)\n`;
@@ -130,9 +140,8 @@ it.each([
   const onAgentEvent = vi.fn();
   const snapshots = vi.spyOn(streamSnapshots, "extractAssistantStreamSnapshot");
   onTestFinished(() => snapshots.mockRestore());
-  const { emit, subscription, onBlockReply } = blockReplyHarness({
+  const { emit, subscription, onBlockReply } = createDeliveryHarness({
     onAgentEvent: test.maxSnapshots ? onAgentEvent : undefined,
-    blockReplyBreak: "text_end",
     blockReplyChunking: { minChars, maxChars, breakPreference: "paragraph" },
   });
   if (test.prefix) {
@@ -196,7 +205,7 @@ async function createGeneratedImageHarness(
   options: Pick<SessionOptions, "blockReplyBreak" | "blockReplyChunking"> = {},
 ) {
   const onToolResult = vi.fn<ToolResult>();
-  const { emit, subscription, onBlockReply } = blockReplyHarness({
+  const { emit, subscription, onBlockReply } = createDeliveryHarness({
     onToolResult,
     verboseLevel: "full",
     blockReplyBreak: "message_end",
@@ -241,7 +250,7 @@ it("blocks local MEDIA urls from case-variant tool names in verbose output", asy
 });
 
 it("delivers generated attachment metadata with the assistant reply", async () => {
-  const { emit, subscription, onBlockReply } = blockReplyHarness({
+  const { emit, subscription, onBlockReply } = createDeliveryHarness({
     blockReplyBreak: "message_end",
     builtinToolNames: new Set(["video_generate"]),
   });
@@ -327,7 +336,7 @@ it("does not attach generated image media to an early streamed chunk before expl
 });
 
 it("does not trust a mixed generated and non-generated pending media batch", async () => {
-  const { emit, subscription, onBlockReply } = blockReplyHarness({
+  const { emit, subscription, onBlockReply } = createDeliveryHarness({
     blockReplyBreak: "message_end",
     internalEvents: [
       completion("music_generation", "/tmp/generated.mp3"),
@@ -345,7 +354,8 @@ it("does not trust a mixed generated and non-generated pending media batch", asy
 });
 
 it("counts orphaned tool media emitted through block replies", async () => {
-  const { emit, subscription, onBlockReply } = blockReplyHarness({
+  const { emit, subscription, onBlockReply } = createDeliveryHarness({
+    blockReplyBreak: undefined,
     builtinToolNames: new Set(["tts"]),
     coreBuiltinToolNames: new Set(["tts"]),
     sourceReplyDeliveryMode: "message_tool_only",
@@ -506,7 +516,7 @@ it.each([
 ] as const)(
   "replaces pending reply directives with authoritative checkpoint target %j",
   async (replyToId, text, terminal, priorText) => {
-    const { emit, subscription, onBlockReply } = blockReplyHarness({
+    const { emit, subscription, onBlockReply } = createDeliveryHarness({
       blockReplyBreak: terminal === "message_end" && !priorText ? "message_end" : "text_end",
       blockReplyChunking:
         terminal === "message_end"
