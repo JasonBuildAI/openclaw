@@ -9,12 +9,14 @@ import {
   stripRelevantMemoriesTags,
   stripAssistantInternalTraceLines,
   stripLegacyBracketToolCallBlocks,
+  scanLegacyBracketToolCallBlocks,
   plainToolCallTransform,
   stripInvisibleAssistantText,
   traceLineHeads,
   INTERNAL_TRACE_LINE_RE,
 } from "./assistant-text-transforms.js";
 import {
+  createCodeRegionResolver,
   findCodeRegions,
   isInsideSettledBlockCode,
   projectLinesOutsideCode,
@@ -149,10 +151,59 @@ export function minimaxToolCallTextFilter(streaming = false): TextFilter {
   };
 }
 
-export const legacyBracketToolCallTextFilter: TextFilter = {
-  transform: stripLegacyBracketToolCallBlocks,
-  activationTokens: ["TOOL_CALL", "TOOL_RESULT"],
-};
+function createLegacyBracketToolCallTextFilter(): TextFilter {
+  const filter = {
+    transform: stripLegacyBracketToolCallBlocks,
+    activationTokens: ["TOOL_CALL", "TOOL_RESULT"] as const,
+  };
+  return {
+    ...filter,
+    create: () => {
+      const resolveRegions = createCodeRegionResolver();
+      const activation = /TOOL_CALL|TOOL_RESULT/i;
+      let activationTail = "";
+      let active = false;
+      let pending = false;
+      let appended: string | null = null;
+      let previousOutput = "";
+      const transform = (text: string) => {
+        // An append without a bracket cannot start a block, and no candidate is
+        // open: only earlier removals decide the prefix, so the tail is appended.
+        if (
+          appended !== null &&
+          !pending &&
+          !appended.includes("[") &&
+          !appended.includes("]") &&
+          resolveRegions.canAppend(appended)
+        ) {
+          previousOutput += appended;
+          return previousOutput;
+        }
+        const scan = scanLegacyBracketToolCallBlocks(text, resolveRegions(text));
+        pending = scan.pending;
+        previousOutput = scan.text;
+        return previousOutput;
+      };
+      return createConditionalTextProjector(transform, (input) => {
+        appended = input.delta;
+        if (!active) {
+          const probe = activationTail + (input.delta ?? input.text);
+          active = activation.test(probe);
+          activationTail = active ? "" : probe.slice(-10);
+          if (!active) {
+            previousOutput = input.text;
+            return false;
+          }
+          // Text seen before activation still has to be scanned.
+          pending = true;
+        }
+        return true;
+      });
+    },
+  };
+}
+
+export const legacyBracketToolCallTextFilter: TextFilter = createLegacyBracketToolCallTextFilter();
 
 export const assistantTraceTextFilter: TextFilter = {
   transform: stripAssistantInternalTraceLines,
