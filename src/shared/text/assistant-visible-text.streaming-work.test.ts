@@ -397,7 +397,7 @@ const batch = (source: string) =>
   sanitizeAssistantVisibleStreamText(source, "final_answer").trimEnd();
 
 it.each([
-  "Use `[TOOL_CALL]` and `[Tool Call: read]` literally.",
+  "Use `[TOOL_CALL]` and `[Tool Call: read]` literally.\n\n```\nhello [TOOL_CALL] tool => \"read\", args => {}\n[/TOOL_CALL]\n```\n\nLater `see [Tool Call: read (ID: 2)] here` continues.",
   "![alt `[Tool Call: read]`](url)",
   "[x](<url `[Tool Call: read (ID: 1)]`xxxx>)\n[x]( <url `[Tool Call: read (ID: 1)]`xxxx>)\n\nDone.",
   "[Tool Call: read]```text\n\nordinary paragraph\n\n[Historical context: literal]\n",
