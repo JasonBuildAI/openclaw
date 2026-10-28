@@ -17,7 +17,7 @@ const secret = "private runtime context";
 const delimiters = [begin, end, RUNTIME_CONTEXT_HEADER];
 
 beforeEach(() => void scrub.mockClear());
-afterAll(() => void scrub.mockRestore());
+afterAll(() => scrub.mockRestore());
 
 function privateBlock(before: string, after: string, indent = "", newline = "\n"): string {
   return [before, indent + begin, secret, indent + end, after].filter(Boolean).join(newline);
@@ -25,8 +25,8 @@ function privateBlock(before: string, after: string, indent = "", newline = "\n"
 
 function expectCanonicalStream(source: string, size: number, label?: string): void {
   const stream = createAssistantVisibleStreamText();
-  const result = streamChunks(source, size, stream, (chunk, end) => {
-    expect(chunk.text, label).toBe(sanitizeAssistantVisibleStreamText(source.slice(0, end)));
+  const result = streamChunks(source, size, stream, (chunk, offset) => {
+    expect(chunk.text, label).toBe(sanitizeAssistantVisibleStreamText(source.slice(0, offset)));
   });
   expect([result.delivered, result.text], label).toEqual(["Visible reply.", "Visible reply."]);
 }
@@ -88,8 +88,8 @@ it.each([1, 2, 3, 5, 7])(
     const stream = createTextProjection(userFacingTextFilters(false, true));
     const normalize = (text: string) => text.replace(/[ \t\r\n]+$/u, "");
 
-    streamChunks(source, size, stream, (result, end) => {
-      const canonical = runtimeContext.stripInternalRuntimeContext(source.slice(0, end), {
+    streamChunks(source, size, stream, (result, offset) => {
+      const canonical = runtimeContext.stripInternalRuntimeContext(source.slice(0, offset), {
         streaming: true,
       });
       expect(normalize(result.text)).toBe(normalize(canonical));
