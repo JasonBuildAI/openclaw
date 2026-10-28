@@ -277,7 +277,7 @@ it("bounds Markdown ownership work for repeated inline-code paragraphs", () => {
   streamChunks(source, 4, stream);
 
   // Inline spans cannot hold a paragraph separator, so the collapsed reply never reparses
-  // its Markdown: 559 full-reply parses before this bound, 0 after.
+  // its Markdown: 13,140,829 scanned characters before this bound, 0 after.
   expect(stream.text).toBe(sanitizeAssistantVisibleStreamText(source, "final_answer"));
   expect(markdownOwnershipWork.scannedCharacters - before).toBeLessThan(source.length * 16);
 });
