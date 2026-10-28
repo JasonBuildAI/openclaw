@@ -166,7 +166,7 @@ it("restores provisional reasoning text and resets its state on replacement", ()
     "<final>" +
     "```text\n<think>literal code</think>\n```\nOrdinary prose follows.\n\n".repeat(4) +
     "</final>";
-  const scenarios = [
+  for (const chunks of [
     ["<final\nx='a'>Answer\n", "next\n"],
     ["<final\nx='a", "'>Answer\n", "next\n"],
     ["<think\n/>Answer\n", "next\n"],
@@ -179,8 +179,7 @@ it("restores provisional reasoning text and resets its state on replacement", ()
     Array.from({ length: Math.ceil(fenced.length / 98) }, (_, index) =>
       fenced.slice(index * 98, (index + 1) * 98),
     ),
-  ];
-  for (const chunks of scenarios) {
+  ]) {
     stream.replace("");
     let source = "";
     let delivered = "";
@@ -367,14 +366,12 @@ it("refreshes image-alt ownership when a long reference destination closes", () 
     "",
     "                [id]: <./url",
   ].join("\n");
-  const scenarios = [
+  for (const chunks of [
     ["![example `x\n[tool:read] {}\nx`][id]\n\n[id]: <", "x".repeat(2_100), ">\n"],
     ["![example `x\n[tool:read] {}\nx`][a b c]\n\n[a\nb\nc]: <", `./${"x".repeat(2_100)}`, ">\n"],
     ["![example `x\n[tool:read] {}\nx`][id]\n\n- item\n\n    [id]: <./url", ">\n"],
     [nestedListContinuationReferencePrefix, ">\n"],
-  ];
-
-  for (const chunks of scenarios) {
+  ]) {
     expect(projectFinal(chunks)).not.toContain("[tool:read] {}");
   }
 });
@@ -418,6 +415,10 @@ it.each([
     `> [label](/url ${quote}\n(no output)\n\`code\n(no output)\ncode\`\n${quote})\n`,
     `> ![label](/url ${quote}\n(no output)\n\`code\n(no output)\ncode\`\n${quote})\n`,
   ]),
+  ...['"', "'", "("].map(
+    (quote) =>
+      `(no output)\n\n> [id]: /url ${quote}title\n> continued\n> \`x\n> ${quote === "(" ? ")" : quote}\n(no output)\nx\``,
+  ),
 ])("preserves batch output through every split: %j", (source) => {
   expectPrefixParity(source, create, batch);
 });

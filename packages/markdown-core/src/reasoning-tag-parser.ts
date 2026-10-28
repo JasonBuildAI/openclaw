@@ -420,9 +420,9 @@ function findContainerContinuation(
     return undefined;
   }
   const prefix = text.slice(paragraphStart, offset);
-  // Labels, unfinished link titles, and code delimiters can gain ownership after an append.
+  // Labels, link or reference titles, and code delimiters can gain ownership after an append.
   if (
-    /[`|]|\]\(/u.test(prefix) ||
+    /[`|]|\][(:]/u.test(prefix) ||
     scanBracketOwnership(text, paragraphStart, offset, [], 0).hasOpenLabel
   ) {
     return undefined;
