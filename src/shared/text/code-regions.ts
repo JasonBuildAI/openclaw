@@ -101,6 +101,141 @@ export function findTextCheckpoint(
   return { offset: closedFence ? cursor : lastLineStart, context: "" };
 }
 
+export type CodeRegionResolver = ((text: string) => ReturnType<typeof findCodeRegions>) & {
+  /** Whether appending `appended` keeps the cached ownership; advances the cache on success. */
+  canAppend(appended: string): boolean;
+};
+
+/**
+ * Reuse canonical Markdown code ranges across streamed appends that cannot change
+ * ownership. A still-open fence extends to the new end; any other block range that
+ * touched the previous end must be rescanned before it can be trusted.
+ */
+export function createCodeRegionResolver(): CodeRegionResolver {
+  let source = "";
+  let ownership: ReturnType<typeof findCodeOwnership> | undefined;
+  let regions: ReturnType<typeof findCodeRegions> = [];
+  let angleDestinationOpen = false;
+  let unmatchedBacktickRun = false;
+  let forceRescan = false;
+  let regionsDirty = false;
+  const rescan = (text: string) => {
+    source = text;
+    forceRescan = false;
+    regionsDirty = false;
+    // Angle-bracket destinations ignore inline code; their closure is not
+    // modeled by the boundary predicate, so appends stay conservative until it closes.
+    angleDestinationOpen = text.lastIndexOf("](<") > text.lastIndexOf(">");
+    unmatchedBacktickRun = hasUnmatchedBacktickRun(text);
+    if (!/[`~\t]| {4}/u.test(text)) {
+      ownership = undefined;
+      regions = [];
+      return regions;
+    }
+    ownership = findCodeOwnership(text);
+    regions = ownership.regions;
+    return regions;
+  };
+  const regionAtEnd = (length: number) => {
+    const last = regions.at(-1);
+    return last?.block && last.end === length ? last : undefined;
+  };
+  const resolve = (text: string) => {
+    if (forceRescan || regionsDirty) {
+      return rescan(text);
+    }
+    if (text === source) {
+      return regions;
+    }
+    if (
+      angleDestinationOpen ||
+      !ownership ||
+      !text.startsWith(source) ||
+      !canReuseMarkdownOwnership(source, text, ownership)
+    ) {
+      return rescan(text);
+    }
+    const trailing = regionAtEnd(source.length);
+    if (trailing) {
+      if (!scanFenceSpans(source.slice(trailing.start)).state.open) {
+        return rescan(text);
+      }
+      regions = [...regions.slice(0, -1), { ...trailing, end: text.length }];
+    }
+    source = text;
+    return regions;
+  };
+  return Object.assign(resolve, {
+    canAppend: (appended: string) => {
+      if (!appended) {
+        return true;
+      }
+      // A backtick can only change earlier code ownership by closing an
+      // unmatched run; a new span after every existing marker is harmless.
+      if (unmatchedBacktickRun && appended.includes("`")) {
+        return false;
+      }
+      if (
+        !canReuseMarkdownOwnershipForAppend(source, appended, ownership, {
+          codeDelimiters: "none",
+        })
+      ) {
+        return false;
+      }
+      // A closed angle destination still needs its closing parenthesis parsed
+      // before inline code inside the destination is known to be literal.
+      if (appended.includes(")") && source.includes("](<")) {
+        forceRescan = true;
+        return false;
+      }
+      if (angleDestinationOpen && appended.includes(">")) {
+        forceRescan = true;
+        return false;
+      }
+      // A new code delimiter accepted here is not in the cached regions yet;
+      // the next scan must rebuild them before trusting marker membership.
+      if (/[`~\t]| {4}/u.test(appended) || / {4}/u.test(source.slice(-3) + appended)) {
+        regionsDirty = true;
+      }
+      const previousLength = source.length;
+      const trailing = regionAtEnd(previousLength);
+      if (trailing && !scanFenceSpans(source.slice(trailing.start)).state.open) {
+        return false;
+      }
+      source += appended;
+      if (trailing && !regionsDirty) {
+        regions = [...regions.slice(0, -1), { ...trailing, end: source.length }];
+      }
+      return true;
+    },
+  });
+}
+
+/** Whether the text ends inside an unmatched inline backtick run. */
+function hasUnmatchedBacktickRun(text: string): boolean {
+  const open = new Map<number, number>();
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== "`") {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (text[index] === "`") {
+      index += 1;
+    }
+    const ticks = index - start;
+    const count = open.get(ticks) ?? 0;
+    open.set(ticks, count > 0 ? count - 1 : 1);
+  }
+  for (const count of open.values()) {
+    if (count > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Reuse a parsed prefix only when an append cannot change Markdown ownership. */
 export function canReuseMarkdownOwnership(
   previousText: string,
@@ -122,17 +257,20 @@ export function canReuseMarkdownOwnershipForAppend(
   previousText: string,
   appended: string,
   ownership?: ReturnType<typeof findCodeOwnership>,
+  options?: { codeDelimiters?: "boundary" | "append" | "none" },
 ): boolean {
   if (!appended) {
     return true;
   }
   const previousBoundary = previousText.slice(-4);
   const boundaryContext = previousBoundary + appended;
+  const delimiterContext = options?.codeDelimiters === "append" ? appended : boundaryContext;
   const completesTableAlignment = appended.includes(":") && /-+[ \t]*$/u.test(previousBoundary);
   const completesShortTableAlignment =
     /(?:-{1,2}:|:-{1,2}|:-{1,2}:)(?=[ \t]*(?:\||\r?\n|\r|$))/u.test(boundaryContext);
+  const skipDelimiters = options?.codeDelimiters === "none";
   if (
-    /[`~\t|]| {4}/u.test(boundaryContext) ||
+    (!skipDelimiters && (/[`~\t|]/u.test(delimiterContext) || / {4}/u.test(boundaryContext))) ||
     (/-{3,}/u.test(boundaryContext) && !/-{3,}/u.test(previousBoundary)) ||
     completesTableAlignment ||
     completesShortTableAlignment ||
@@ -371,12 +509,17 @@ function completesInlineLinkTitleForAppend(
     return false;
   }
 
-  const sourceStart = Math.min(retainStart, previousText.length);
-  const previousSource = previousText.slice(sourceStart);
   // Link destinations can contain balanced parentheses, and title whitespace
   // can cross a line ending. Keep this candidate scan permissive: false positives
   // only trigger a canonical ownership refresh.
-  return /\]\([\s\S]*?\s["'(][\s\S]*$/u.test(previousSource);
+  let openIndex = previousText.lastIndexOf("](", previousText.length - 1);
+  while (openIndex >= Math.min(retainStart, previousText.length)) {
+    if (/\]\([\s\S]*?\s["'(][\s\S]*$/u.test(previousText.slice(openIndex))) {
+      return true;
+    }
+    openIndex = openIndex === 0 ? -1 : previousText.lastIndexOf("](", openIndex - 1);
+  }
+  return false;
 }
 
 function stripBlockquotePrefixes(text: string) {
