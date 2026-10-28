@@ -197,7 +197,7 @@ export function canReuseMarkdownOwnershipForAppend(
     return true;
   }
   // Closing an angle destination can turn earlier backticks into URL text.
-  if (/[>)]/u.test(appended) && previousText.includes("](<")) {
+  if (/[>)]/u.test(appended) && /\]\(\s*</u.test(previousText)) {
     return false;
   }
   if (ownership.unsettledDefinitionStarts.length > 0) {
