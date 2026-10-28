@@ -548,14 +548,13 @@ it("retains raw XML projection across a source replacement", () => {
 });
 it.each([
   ["", `before${"\n".repeat(60_000)}after`],
-  ...["\r", "\n", "\r\n"].flatMap((eol) => [
-    ["MEDIA: ./a.png\nCaption", `${eol}MEDIA: ./b.png${eol}After`],
-    ...["M", "ME", "MED", "MEDI", "MEDIA"].map((marker) => [
+  ...["\r", "\n", "\r\n"].flatMap((eol) =>
+    ["", "M", "ME", "MED", "MEDI", "MEDIA"].map((marker) => [
       "MEDIA: ./a.png\nCaption",
-      `${eol}${marker}`,
-      `${"MEDIA".slice(marker.length)}: ./b.png${eol}After`,
+      marker ? `${eol}${marker}` : `${eol}MEDIA: ./b.png${eol}After`,
+      marker ? `${"MEDIA".slice(marker.length)}: ./b.png${eol}After` : "",
     ]),
-  ]),
+  ),
 ])("keeps media boundaries and long blank runs canonical: %j", (...chunks: string[]) => {
   const resolve = createStreamingReplyResolver();
   let previousText = "";

@@ -3,6 +3,7 @@ import * as replyDirectives from "../auto-reply/reply/reply-directives.js";
 import * as updates from "./embedded-agent-subscribe.handlers.messages.test-helpers.js";
 import { createOpenAiResponsesTextEvent } from "./embedded-agent-subscribe.openai-responses.test-helpers.js";
 import * as runtimeContext from "./internal-runtime-context.js";
+
 // Projections cache their filters, so keep both spies installed across deltas.
 const scrub = vi.spyOn(runtimeContext, "stripInternalRuntimeContext");
 const parse = vi.spyOn(replyDirectives, "parseReplyDirectives");
