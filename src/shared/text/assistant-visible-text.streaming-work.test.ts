@@ -399,6 +399,7 @@ const batch = (source: string) =>
 it.each([
   "Use `[TOOL_CALL]` and `[Tool Call: read]` literally.",
   "![alt `[Tool Call: read]`](url)",
+  "[x](<url `[Tool Call: read (ID: 1)]`xxxx>)\n\nDone.",
   "[Tool Call: read]```text\n\nordinary paragraph\n\n[Historical context: literal]\n",
   "[Tool Call: read]> ```text\n> [Historical context: literal]\n\nDone.",
   '[link](url "see `[Tool Call: read]` here")',
@@ -450,16 +451,16 @@ it.each(["fenced", "indented", "lazy", "prefixed", "inline", "paragraph", "legac
       shape === "inline" || shape === "paragraph"
         ? `The command produced (no output).${newline}${newline}`
         : `${prefix}(no output)\n`;
-    const tail = Array.from(
-      { length: 256 },
-      (_, index) => `${prefix}Log record ${index}.${newline}`,
-    ).join("");
     const transcript =
       shape === "legacy"
         ? '```text\n[TOOL_CALL] tool => "read", args => {}[/TOOL_CALL]\n```\n'
         : shape === "downgraded"
           ? "`[Tool Call: read]` and `[Historical context: example]`\n"
           : "";
+    const tail = Array.from(
+      { length: 256 },
+      (_, index) => `${prefix}Log record ${index}${transcript && " `code`"}.${newline}`,
+    ).join("");
     const source = (transcript + opening + line + tail).slice(0, 4096);
     for (const size of transcript ? [4] : [1, 4]) {
       let previous = Infinity;
@@ -471,11 +472,11 @@ it.each(["fenced", "indented", "lazy", "prefixed", "inline", "paragraph", "legac
           delivered = streamChunks(text, size, stream).delivered;
         });
         expect([stream.text, delivered]).toEqual([batch(text), batch(text)]);
-        // This counts whole-path regexp work, not only placeholder-stage characters.
-        // Downgraded transcripts retain three independently checkpointed grammar passes.
-        const budget = shape === "downgraded" ? 256 : 192;
+        // Tool transcripts exercise every canonical pass with inline code in the tail.
+        const budget = transcript ? 384 : 192;
         expect(scanned).toBeLessThan(text.length * budget);
-        expect(markdownOwnershipWork.scannedCharacters - before).toBeLessThan(text.length * 32);
+        const parsed = markdownOwnershipWork.scannedCharacters - before;
+        expect(parsed).toBeLessThan(text.length * (transcript ? 64 : 32));
         expect(scanned).toBeLessThanOrEqual(previous * 2.25);
         previous = scanned;
       }
