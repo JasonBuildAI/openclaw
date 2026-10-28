@@ -163,7 +163,7 @@ export function scanLegacyBracketToolCallBlocks(
 
   let result = "";
   let cursor = 0;
-  let pending = false;
+  let pending = text.lastIndexOf("[") > text.lastIndexOf("]");
   for (const openMatch of text.matchAll(/\[\s*TOOL_(CALL|RESULT)\s*\]/gi)) {
     const openStart = openMatch.index;
     if (openStart < cursor || isInsideCode(openStart, codeRegions)) {
@@ -200,14 +200,11 @@ export function scanLegacyBracketToolCallBlocks(
   return { text: result + text.slice(cursor), pending };
 }
 
-export function stripLegacyBracketToolCallBlocks(
-  text: string,
-  protectedRegions?: ReturnType<typeof findCodeRegions>,
-): string {
+export function stripLegacyBracketToolCallBlocks(text: string): string {
   if (!text || !LEGACY_BRACKET_TOOL_BLOCK_QUICK_RE.test(text)) {
     return text;
   }
-  return scanLegacyBracketToolCallBlocks(text, protectedRegions ?? findCodeRegions(text)).text;
+  return scanLegacyBracketToolCallBlocks(text, findCodeRegions(text)).text;
 }
 
 export function stripRelevantMemoriesTags(text: string): string {
