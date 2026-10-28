@@ -422,6 +422,10 @@ it.each([
   ].map((tail) => "> $ build\n(no output)\n[tool calls omitted]\n" + tail),
   "> `open\n(no output)\nclose`",
   "> ![open\n(no output)\n`code`][id]\n\n[id]: /url",
+  ...['"', "'"].flatMap((quote) => [
+    `> [label](/url ${quote}\n(no output)\n\`code\n(no output)\ncode\`\n${quote})\n`,
+    `> ![label](/url ${quote}\n(no output)\n\`code\n(no output)\ncode\`\n${quote})\n`,
+  ]),
 ])("preserves batch output through every split: %j", (source) => {
   expectPrefixParity(source, create, batch);
 });
@@ -452,18 +456,14 @@ it.each(["fenced", "indented", "lazy", "prefixed", "inline"])(
   },
 );
 
-it.each(["Intro.\n\n$ build\n(no output)\n\nTail", "Intro.\n\n(no out"])(
-  "resumes a replacement: %j",
-  (replacement) => {
+it("resumes replacements and activates after a long published prefix", () => {
+  for (const replacement of ["Intro.\n\n$ build\n(no output)\n\nTail", "Intro.\n\n(no out"]) {
     const stream = create();
     stream.append("Intro without a placeholder.");
     stream.replace(replacement);
     stream.append("put)\n\nDone.");
-    expect(stream.text).toBe(batch(replacement + "put)\n\nDone."));
-  },
-);
-
-it("activates after a long published prefix", () => {
+    expect(stream.text, replacement).toBe(batch(replacement + "put)\n\nDone."));
+  }
   const source = "Earlier step.\n\n".repeat(512) + "```\n(no output)\n```\n\nDone.";
   expect(streamChunks(source, 4, create()).text).toBe(batch(source));
 });
