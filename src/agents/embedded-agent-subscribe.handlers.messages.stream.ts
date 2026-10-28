@@ -442,8 +442,8 @@ export function createStreamingReplyResolver(): StreamingReplyResolver {
       params.next.endsWith(params.appendDelta) &&
       !params.appendDelta.includes("[[") &&
       !params.appendDelta.endsWith("[") &&
-      !/(?:^|\n)[^\S\n]*MEDIA:/iu.test(settledDirectiveSource.slice(-1) + params.appendDelta) &&
-      !/(?:^|\n)[\t ]*(?:M|ME|MED|MEDI|MEDIA)$/iu.test(
+      !/(?:^|[\r\n])[^\S\r\n]*MEDIA:/iu.test(settledDirectiveSource.slice(-1) + params.appendDelta) &&
+      !/(?:^|[\r\n])[\t ]*(?:M|ME|MED|MEDI|MEDIA)$/iu.test(
         settledDirectiveSource.slice(-1) + params.appendDelta,
       )
     ) {
