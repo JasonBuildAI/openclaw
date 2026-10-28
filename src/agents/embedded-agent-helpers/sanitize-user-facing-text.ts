@@ -72,24 +72,37 @@ const internalPlaceholderLinesTextFilter: TextFilter = {
 
 function createInternalPlaceholderLinesProjector(): TextProjector {
   let matched = false;
-  let lineTail = "";
-  // Completed lines are final, so only the incoming delta and the unfinished line are scanned.
+  let lineTail: string | null = "";
+  let allowToolCallsOmitted = true;
+  // Reject a nonmatching line until its newline; retain only a possible literal token prefix.
   const scanAppendedLines = (appended: string): boolean => {
     let start = 0;
     while (true) {
       const newline = appended.indexOf("\n", start);
-      if (newline === -1) {
-        lineTail += appended.slice(start);
-        return isInternalPlaceholderLine(lineTail);
+      if (lineTail !== null) {
+        const line = lineTail + appended.slice(start, newline === -1 ? undefined : newline);
+        const candidate = line.trimStart();
+        // Only the exec placeholder accepts Unicode padding; the bracket token accepts ASCII.
+        allowToolCallsOmitted &&= /^[ \t]*$/u.test(line.slice(0, line.length - candidate.length));
+        const normalized = candidate.replace(/\r$/u, "");
+        if (
+          isInternalPlaceholderLine(normalized) &&
+          (allowToolCallsOmitted || normalized.trim() === EXEC_NO_OUTPUT_PLACEHOLDER)
+        ) {
+          return true;
+        }
+        lineTail =
+          EXEC_NO_OUTPUT_PLACEHOLDER.startsWith(normalized) ||
+          (allowToolCallsOmitted && TOOL_CALLS_OMITTED_TOKEN.startsWith(normalized.toLowerCase()))
+            ? candidate
+            : null;
       }
-      const line =
-        (start === 0 ? lineTail : "") + appended.slice(start, newline).replace(/\r$/u, "");
-      if (isInternalPlaceholderLine(line)) {
-        lineTail = "";
-        return true;
+      if (newline === -1) {
+        return false;
       }
       start = newline + 1;
       lineTail = "";
+      allowToolCallsOmitted = true;
     }
   };
   return createConditionalTextProjector(
@@ -103,6 +116,7 @@ function createInternalPlaceholderLinesProjector(): TextProjector {
         // unfinished tail is carried into the next delta instead of being dropped.
         matched = false;
         lineTail = "";
+        allowToolCallsOmitted = true;
         matched = scanAppendedLines(input.text);
         return matched;
       }

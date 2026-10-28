@@ -1,6 +1,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { expect, it, vi } from "vitest";
 import * as toolCallRepair from "../../../packages/tool-call-repair/src/payload.js";
+import { userFacingTextFilters } from "../../agents/embedded-agent-helpers/sanitize-user-facing-text.js";
 import {
   createAssistantVisibleStreamText,
   sanitizeAssistantVisibleStreamText,
@@ -35,9 +36,7 @@ it.each([
 it("keeps a split tool header across an unbounded whitespace gap", () => {
   const chunks = ["Before\n[too", "l:write]", "\r\n" + " ".repeat(5000), '{"content":"ok"}\nDone.'];
   const stream = createAssistantVisibleStreamText("final_answer");
-  for (const chunk of chunks) {
-    stream.append(chunk);
-  }
+  chunks.forEach((chunk) => stream.append(chunk));
   expect(stream.text).toBe("Before\nDone.");
 });
 
@@ -51,12 +50,9 @@ vi.mock("./code-regions.js", async (importOriginal) => {
       markdownOwnershipWork.scannedCharacters += text.length;
       return actual.findCodeRegions(text);
     },
-    findCodeOwnership(
-      text: Parameters<typeof actual.findCodeOwnership>[0],
-      options?: Parameters<typeof actual.findCodeOwnership>[1],
-    ) {
-      markdownOwnershipWork.scannedCharacters += text.length;
-      return actual.findCodeOwnership(text, options);
+    findCodeOwnership(...args: Parameters<typeof actual.findCodeOwnership>) {
+      markdownOwnershipWork.scannedCharacters += args[0].length;
+      return actual.findCodeOwnership(...args);
     },
   };
 });
@@ -82,9 +78,7 @@ vi.mock("../../../packages/markdown-core/src/markdown-code-regions.js", async (i
 
 function projectFinal(chunks: readonly string[]) {
   const stream = createAssistantVisibleStreamText("final_answer");
-  for (const chunk of chunks) {
-    stream.append(chunk);
-  }
+  chunks.forEach((chunk) => stream.append(chunk));
   expect(stream.text).toBe(sanitizeAssistantVisibleStreamText(chunks.join(""), "final_answer"));
   return stream.text;
 }
@@ -231,10 +225,8 @@ it("keeps a trailing high surrogate pending until its visibility is known", () =
   const stream = createTextProjection(assistantVisibleTextFilters("delivery", true));
   expect(stream.append("\uDB40")).toEqual({ text: "", delta: "" });
   expect(stream.append("\uDC67")).toEqual({ text: "", delta: "" });
-  expect(stream.append("Answer")).toEqual({
-    text: "\uDB40\uDC67Answer",
-    delta: "\uDB40\uDC67Answer",
-  });
+  const visible = "\uDB40\uDC67Answer";
+  expect(stream.append("Answer")).toEqual({ text: visible, delta: visible });
   expect(stream.replace("\uDB40")).toEqual({ text: "", delta: null });
   expect(stream.append("x").text).toBe("\uDB40x");
   expect(stream.replace("\uD83D").text).toBe("");
@@ -430,14 +422,18 @@ it.each([
   expectPrefixParity(source, create, batch);
 });
 
-it.each(["fenced", "indented", "lazy", "prefixed", "inline"])(
+it.each(["fenced", "indented", "lazy", "prefixed", "inline", "paragraph"])(
   "bounds %s transcript work",
   (shape) => {
     const prefix = shape === "indented" ? "    " : shape === "prefixed" ? "> " : "";
     const opening = shape === "fenced" ? "```text\n" : shape === "lazy" ? "> $ build\n" : "";
+    const newline = shape === "paragraph" ? "" : "\n";
     const line =
-      shape === "inline" ? "The command produced (no output).\n\n" : `${prefix}(no output)\n`;
-    const source = (opening + line + `${prefix}Unique log record.\n`.repeat(256)).slice(0, 4096);
+      shape === "inline" || shape === "paragraph"
+        ? `The command produced (no output).${newline}${newline}`
+        : `${prefix}(no output)\n`;
+    const tail = `${prefix}Unique log record.${newline}`.repeat(256);
+    const source = (opening + line + tail).slice(0, 4096);
     for (const size of [1, 4]) {
       let previous = Infinity;
       for (const text of [source.slice(0, 2048), source]) {
@@ -456,7 +452,7 @@ it.each(["fenced", "indented", "lazy", "prefixed", "inline"])(
   },
 );
 
-it("resumes replacements and activates after a long published prefix", () => {
+it("preserves replacement, split CRLF and late activation boundaries", () => {
   for (const replacement of ["Intro.\n\n$ build\n(no output)\n\nTail", "Intro.\n\n(no out"]) {
     const stream = create();
     stream.append("Intro without a placeholder.");
@@ -466,4 +462,7 @@ it("resumes replacements and activates after a long published prefix", () => {
   }
   const source = "Earlier step.\n\n".repeat(512) + "```\n(no output)\n```\n\nDone.";
   expect(streamChunks(source, 4, create()).text).toBe(batch(source));
+  const direct = createTextProjection(userFacingTextFilters(false, true));
+  expect(direct.append("[tool calls omitted]\r").text).toBe("[tool calls omitted]\r");
+  expect(direct.append("\nDone").text).toBe("Done");
 });
