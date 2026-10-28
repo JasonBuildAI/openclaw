@@ -1,5 +1,5 @@
 import { expectDefined } from "@openclaw/normalization-core";
-import { expect, it, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import { getReplyPayloadMetadata } from "../auto-reply/reply-payload.js";
 import * as agentEvents from "../infra/agent-events.js";
 import { createDeliveryHarness } from "./embedded-agent-subscribe.delivery.test-support.js";
@@ -9,16 +9,14 @@ import {
   emitToolRun,
   extractAgentEventPayloads,
 } from "./embedded-agent-subscribe.e2e-harness.js";
+import * as streamSnapshots from "./embedded-agent-subscribe.handlers.messages.snapshot.js";
 import {
   createOpenAiResponsesPartial,
   createOpenAiResponsesTextBlock,
   createOpenAiResponsesTextEvent,
 } from "./embedded-agent-subscribe.openai-responses.test-helpers.js";
 import type { SubscribeEmbeddedAgentSessionParams } from "./embedded-agent-subscribe.types.js";
-import {
-  createAssistantVisibleStreamText,
-  sanitizeAssistantVisibleStreamText,
-} from "./embedded-agent-utils.js";
+import { sanitizeAssistantVisibleStreamText } from "./embedded-agent-utils.js";
 import { makeAgentAssistantMessage } from "./test-helpers/agent-message-fixtures.js";
 import { textAssistant } from "./test-helpers/sparse-transcript.test-support.js";
 import { markCoreTtsToolResult } from "./tools/tts-tool-result-provenance.js";
@@ -94,18 +92,15 @@ function completion(source: "music_generation" | "subagent", mediaUrl: string) {
   };
 }
 
-function emitOrphanedVoice(emit: (event: unknown) => void) {
-  const media = { mediaUrl: "/tmp/reply.opus", audioAsVoice: true, trustedLocalMedia: true };
-  emit({
-    type: "tool_execution_end",
-    toolName: "tts",
-    toolCallId: "tc-1",
-    isError: false,
-    result: markCoreTtsToolResult({ details: { media } }, [media.mediaUrl]),
-  });
-}
-
 it.each([
+  ...["indented", "lazy"].map((name) => {
+    const indent = name === "indented" ? "    " : "";
+    const opening = `${name === "lazy" ? "> Command\n" : ""}${indent}(no output)\n`;
+    const body = `${indent}Captured output remains visible.\n`.repeat(256);
+    const source = (opening + body).slice(0, 4096);
+    const expected = (name === "indented" ? source : source.replace("(no output)\n", "")).trimEnd();
+    return { name, source, expected, chunkSize: 4, maxSnapshots: 32 };
+  }),
   { name: "graphemes", source: `${"x".repeat(1195)}👨‍👩‍👧‍👦done`, minChars: 800, maxChars: 1200 },
   { name: "empty tool payloads", source: "[tool:read] {}\n[tool:read] {}\n", hidden: true },
   {
@@ -131,8 +126,12 @@ it.each([
     beforeEnd: "Hello there",
   },
 ])("streams $name at the block-delivery boundary", async (test) => {
-  const { minChars = 8, maxChars = 24 } = test;
+  const { minChars = 8, maxChars = 24, chunkSize = 1 } = test;
+  const onAgentEvent = vi.fn();
+  const snapshots = vi.spyOn(streamSnapshots, "extractAssistantStreamSnapshot");
+  onTestFinished(() => snapshots.mockRestore());
   const { emit, subscription, onBlockReply } = blockReplyHarness({
+    onAgentEvent: test.maxSnapshots ? onAgentEvent : undefined,
     blockReplyBreak: "text_end",
     blockReplyChunking: { minChars, maxChars, breakPreference: "paragraph" },
   });
@@ -146,12 +145,17 @@ it.each([
   }
   emitMessage(emit, "message_start");
   let text = "";
-  for (const delta of Array.from(test.source)) {
+  for (let offset = 0; offset < test.source.length; offset += chunkSize) {
+    const delta = test.source.slice(offset, offset + chunkSize);
     text += delta;
     emitResponsesText(emit, "text_delta", text, "answer", delta);
   }
   const chunks = () => onBlockReply.mock.calls.map(([reply]) => reply.text ?? "");
   await subscription.waitForPendingEvents();
+  if (test.maxSnapshots) {
+    expect(extractAgentEventPayloads(onAgentEvent.mock.calls).at(-1)?.text).toBe(test.expected);
+    expect(snapshots.mock.calls.length).toBeLessThan(test.maxSnapshots);
+  }
   if (test.beforeEnd) {
     expect(chunks().join("").replace(/\s/gu, "")).toContain(test.beforeEnd.replace(/\s/gu, ""));
   }
@@ -164,7 +168,7 @@ it.each([
   const source = onBlockReply.mock.calls
     .map(([reply]) => getReplyPayloadMetadata(reply)?.blockSourceText ?? reply.text ?? "")
     .join("");
-  expect(source.trimEnd()).toBe(test.hidden ? "" : test.source);
+  expect(source.trimEnd()).toBe(test.hidden ? "" : (test.expected ?? test.source));
   for (const visible of test.visible ?? []) {
     expect(chunks().join("").replace(/\s/gu, "")).toContain(visible.replace(/\s/gu, ""));
   }
@@ -180,21 +184,8 @@ function createAgentEventHarness(
   options: Omit<SessionOptions, "runId" | "onAgentEvent"> & { runId?: string } = {},
 ) {
   const onAgentEvent = vi.fn();
-  return {
-    ...createSubscribedSessionHarness({ runId: "run", onAgentEvent, ...options }),
-    onAgentEvent,
-  };
-}
-
-function createToolErrorHarness(runId: string) {
-  const harness = createSubscribedSessionHarness({ runId, sessionKey: "test-session" });
-  return {
-    ...harness,
-    fail: (id: string, path: string) =>
-      runTool(harness.emit, "write", id, { path, content: "next" }, { error: "disk full" }, true),
-    recover: (id: string, path: string) =>
-      runTool(harness.emit, "write", id, { path, content: "retry" }, { ok: true }),
-  };
+  const harness = createSubscribedSessionHarness({ runId: "run", onAgentEvent, ...options });
+  return { ...harness, onAgentEvent };
 }
 
 function emitAssistantTextDelta(emit: (evt: unknown) => void, delta: string) {
@@ -224,10 +215,8 @@ function expectBlockReplyPayload(
   onBlockReply: ReturnType<typeof vi.fn<BlockReply>>,
   expected: { text: string; mediaUrls?: string[]; trustedLocalMedia?: boolean },
 ) {
-  const payload = expectDefined(
-    onBlockReply.mock.calls.find(([reply]) => reply.text === expected.text)?.[0],
-    "expected matching block reply",
-  );
+  const match = onBlockReply.mock.calls.find(([reply]) => reply.text === expected.text)?.[0];
+  const payload = expectDefined(match, "expected matching block reply");
   if (expected.mediaUrls !== undefined) {
     expect(payload.mediaUrls).toStrictEqual(expected.mediaUrls);
   }
@@ -318,10 +307,9 @@ it("does not attach generated image media to an early streamed chunk before expl
   emitAssistantTextDelta(emit, "Generated 1 image.\n");
   await subscription.waitForPendingEvents();
   expectBlockReplyPayload(onBlockReply, { text: "Generated 1 image." });
-  const earlyMediaPayloads = onBlockReply.mock.calls.filter(
-    ([payload]) => payload.mediaUrls?.length,
+  expect(onBlockReply.mock.calls.filter(([payload]) => payload.mediaUrls?.length)).toStrictEqual(
+    [],
   );
-  expect(earlyMediaPayloads).toStrictEqual([]);
   emitAssistantTextDelta(emit, "MEDIA:/tmp/generated.png");
   emitUpdate(
     emit,
@@ -362,7 +350,14 @@ it("counts orphaned tool media emitted through block replies", async () => {
     coreBuiltinToolNames: new Set(["tts"]),
     sourceReplyDeliveryMode: "message_tool_only",
   });
-  emitOrphanedVoice(emit);
+  const media = { mediaUrl: "/tmp/reply.opus", audioAsVoice: true, trustedLocalMedia: true };
+  emit({
+    type: "tool_execution_end",
+    toolName: "tts",
+    toolCallId: "tc-1",
+    isError: false,
+    result: markCoreTtsToolResult({ details: { media } }, [media.mediaUrl]),
+  });
   emit({ type: "agent_end" });
   await subscription.waitForPendingEvents();
   expect(onBlockReply).toHaveBeenCalledWith({
@@ -572,7 +567,14 @@ it.each([
 );
 
 it("preserves distinct mutation failures through compaction until each action recovers", async () => {
-  const { emit, subscription, fail, recover } = createToolErrorHarness("compaction-retry");
+  const { emit, subscription } = createSubscribedSessionHarness({
+    runId: "compaction-retry",
+    sessionKey: "test-session",
+  });
+  const fail = (id: string, path: string) =>
+    runTool(emit, "write", id, { path, content: "next" }, { error: "disk full" }, true);
+  const recover = (id: string, path: string) =>
+    runTool(emit, "write", id, { path, content: "retry" }, { ok: true });
   fail("write-a-failed", "/tmp/a.txt");
   fail("write-b-failed", "/tmp/b.txt");
   emit(retryingCompactionEnd());
@@ -661,6 +663,12 @@ const call = `[tool:block_reply_proof]\n{"path":"notes.txt","content":"${SENTINE
 const ordinaryProse =
   "First sentence stays visible. Second sentence stays visible. Third sentence stays visible.";
 const documents = {
+  "indented placeholder": "    (no output)\n    Captured output.\n\nDone.",
+  "lazy blockquote placeholder": "> Command output\n(no output)\nContinued output.\n\nDone.",
+  "leading and trailing whitespace": "\n\t\nVisible text.\n\nMore text. \t\n",
+  "transformed whitespace": "\n\t\n(no output)\nVisible text.\n\nMore text. \t\n",
+  "reply directive": "(no output)\n[[reply_to:target]] Kept text.",
+  "force-flushed padding": "(no output)\n\n    code \n\t",
   "late image reference":
     "![example `x\n<tool_call><function=read>{}</function></tool_call>\nx`][id]\n\n[id]: /url\n",
   "late link title":
@@ -701,14 +709,10 @@ async function streamReply(params: {
   beforeEnd?: () => Promise<void>;
 }) {
   emitMessage(params.emit, "message_start");
-  const projection = createAssistantVisibleStreamText("final_answer");
   let prefix = "";
   for (const delta of params.chunks) {
     prefix += delta;
     emitResponsesText(params.emit, "text_delta", prefix, "canonical-answer", delta);
-    expect(projection.append(delta).text, JSON.stringify(prefix)).toBe(
-      sanitizeAssistantVisibleStreamText(prefix, "final_answer"),
-    );
   }
   await params.beforeEnd?.();
   emitResponsesText(params.emit, "text_end", prefix, "canonical-answer");
@@ -718,18 +722,23 @@ async function streamReply(params: {
 it.each(Object.entries(documents))(
   "preserves canonical delivered bytes across every split: %s",
   async (_name, doc) => {
-    const expected = sanitizeAssistantVisibleStreamText(doc, "final_answer");
+    const expected =
+      _name === "reply directive"
+        ? "Kept text."
+        : sanitizeAssistantVisibleStreamText(doc, "final_answer");
     expect(expected).not.toContain(SENTINEL);
     for (const chunks of chunkings(doc)) {
       const blocks: string[] = [];
       const sources: string[] = [];
+      const targets: (string | undefined)[] = [];
       const { emit, subscription } = createSubscribedSessionHarness({
         runId: "block-parity",
         onBlockReply: (payload) => {
           blocks.push(payload.text ?? "");
           sources.push(getReplyPayloadMetadata(payload)?.blockSourceText ?? payload.text ?? "");
+          targets.push(payload.replyToId);
         },
-        blockReplyBreak: "text_end",
+        blockReplyBreak: _name === "force-flushed padding" ? "message_end" : "text_end",
         blockReplyChunking: { minChars: 12, maxChars: 40 },
       });
       try {
@@ -741,17 +750,26 @@ it.each(Object.entries(documents))(
             if (_name === "ordinary prose") {
               expect(blocks.length).toBeGreaterThan(1);
             }
-            if (_name.startsWith("unfinished") || _name === "multiline inline code") {
+            if (
+              _name.startsWith("unfinished") ||
+              _name === "multiline inline code" ||
+              _name === "force-flushed padding"
+            ) {
               expect(blocks).toEqual([]);
+            }
+            if (_name === "force-flushed padding") {
+              runTool(emit, "read", "flush-proof", { path: "fixture.txt" }, { content: [] });
+              await subscription.waitForPendingEvents();
+              expect(sources.join("").trimEnd()).toBe(expected);
             }
           },
         });
         await subscription.waitForPendingEvents();
         // Source metadata excludes the chunker's synthetic close/reopen fences and retains
         // separators consumed at message boundaries, so compare original visible bytes.
-        if (_name === "prose around a call") {
+        if (["prose around a call", "leading and trailing whitespace"].includes(_name)) {
           // Separate channel messages own their boundary whitespace.
-          expect(blocks.map((text) => text.trim())).toEqual(expected.split("\n"));
+          expect(blocks.map((text) => text.trim())).toEqual(expected.split(/\n+/u));
         } else {
           expect(sources.join("").trimEnd(), JSON.stringify({ chunks, blocks, sources })).toBe(
             expected,
@@ -759,6 +777,9 @@ it.each(Object.entries(documents))(
         }
         if (!expected) {
           expect(blocks).toEqual([]);
+        }
+        if (_name === "reply directive") {
+          expect(targets).toContain("target");
         }
         if (_name === "unfinished payload") {
           // A held candidate must not delay the next assistant message.

@@ -200,19 +200,15 @@ describe("Responses final delivery", () => {
       id: "item-a",
       signaturePhase: "final_answer",
     });
-    h.emit({ type: "message_start", message: base });
+    h.start(base);
     for (const [contentIndex, item] of items.entries()) {
       const partial = createOpenAiResponsesPartial({ ...item, signaturePhase: "final_answer" });
       for (const type of ["text_delta", "text_end"] as const) {
-        h.emit({
-          type: "message_update",
-          message: partial,
-          assistantMessageEvent: {
-            type,
-            contentIndex,
-            ...(type === "text_delta" ? { delta: item.text } : { content: item.text }),
-            partial,
-          },
+        h.update(partial, {
+          type,
+          contentIndex,
+          ...(type === "text_delta" ? { delta: item.text } : { content: item.text }),
+          partial,
         });
       }
       await h.subscription.waitForPendingEvents();
@@ -223,7 +219,7 @@ describe("Responses final delivery", () => {
       content: items.map(({ text, id }) => block(text, id, "final_answer")),
     };
     for (let repeat = 0; repeat < 2; repeat++) {
-      h.emit({ type: "message_end", message });
+      h.end(message);
       await h.subscription.waitForPendingEvents();
       expect(h.texts()).toEqual(["Alpha", "Beta"]);
       expect(h.onBlockReply).toHaveBeenCalledTimes(2);
@@ -340,23 +336,16 @@ describe("Responses final delivery", () => {
         .slice(0, count)
         .map((text, index) => block(text, `answer-${index}`, "final_answer")),
     });
-    h.emit({ type: "message_start", message: base });
+    h.start(base);
     for (const [contentIndex, delta] of texts.entries()) {
       const partial = messageAt(contentIndex + 1);
-      h.emit({
-        type: "message_update",
-        message: partial,
-        assistantMessageEvent: { type: "text_delta", contentIndex, delta, partial },
-      });
+      h.update(partial, { type: "text_delta", contentIndex, delta, partial });
       await h.subscription.waitForPendingEvents();
       expect(h.onBlockReply).not.toHaveBeenCalled();
       expect(h.subscription.assistantTexts).toEqual([]);
     }
     expect(onAgentEvent).not.toHaveBeenCalled();
-    h.emit({
-      type: "message_end",
-      message: messageAt(texts.length),
-    });
+    h.end(messageAt(texts.length));
     await h.subscription.waitForPendingEvents();
     expectSingle(h, "First\nSecond");
     expect(onAgentEvent.mock.calls.at(-1)?.[0]).toMatchObject({
@@ -374,8 +363,8 @@ describe("terminal visible replies", () => {
       arguments: { action: "send", target: "test-target", message: "Visible reply." },
     });
     const message = { ...textAssistant(`<final>${encoded}</final>`), api: "openai-completions" };
-    h.emit({ type: "message_start", message });
-    h.emit({ type: "message_end", message });
+    h.start(message);
+    h.end(message);
     await h.subscription.waitForPendingEvents();
     expect(h.texts()).toEqual(["Visible reply."]);
     for (const [payload] of h.onBlockReply.mock.calls) {
@@ -399,7 +388,7 @@ describe("terminal visible replies", () => {
       id: "item-final-code",
       signaturePhase: "final_answer",
     });
-    h.emit({ type: "message_start", message: { ...message, content: [] } });
+    h.start({ ...message, content: [] });
     {
       let accumulatedText = "";
       for (const delta of ["    ", "const value = 1;\n", "    use(value);"]) {
@@ -408,15 +397,11 @@ describe("terminal visible replies", () => {
           ...message,
           content: message.content.map((part) => ({ ...part, text: accumulatedText })),
         };
-        h.emit({
-          type: "message_update",
-          message: partial,
-          assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta, partial },
-        });
+        h.update(partial, { type: "text_delta", contentIndex: 0, delta, partial });
         await h.subscription.waitForPendingEvents();
       }
     }
-    h.emit({ type: "message_end", message });
+    h.end(message);
     await h.subscription.waitForPendingEvents();
     for (const texts of [h.texts(), h.subscription.assistantTexts]) {
       expect
@@ -437,9 +422,9 @@ describe("terminal visible replies", () => {
   it("does not replay a source range assembled from multiple streamed chunks", async () => {
     const h = setup({ blockReplyChunking: { minChars: 1, maxChars: 4 } });
     const text = "aaaaaaaaaaaa";
-    h.emit({ type: "message_start", message: { role: "assistant" } });
+    h.start();
     emitAssistantTextDelta({ emit: h.emit, delta: text });
-    h.emit({ type: "message_end", message: textAssistant(text) });
+    h.end(textAssistant(text));
     expect(h.texts()).toEqual(["aaaa", "aaaa", "aaaa"]);
     emitAssistantTextEnd({ emit: h.emit, content: text });
     await Promise.resolve();
@@ -448,7 +433,7 @@ describe("terminal visible replies", () => {
 
   it("delivers the full final text when it extends suppressed commentary", async () => {
     const h = setup();
-    h.emit({ type: "message_start", message: { role: "assistant" } });
+    h.start();
     responsePair(h, "Hello", "item_commentary", "commentary");
     await Promise.resolve();
     expect(h.onBlockReply).not.toHaveBeenCalled();
@@ -459,18 +444,15 @@ describe("terminal visible replies", () => {
 
   it("delivers the final answer at message_end after streamed commentary", async () => {
     const h = setup();
-    h.emit({ type: "message_start", message: { role: "assistant" } });
+    h.start();
     responsePair(h, "Working...", "item_commentary", "commentary");
     await Promise.resolve();
-    h.emit({
-      type: "message_end",
-      message: {
-        role: "assistant",
-        content: [
-          block("Working...", "item_commentary", "commentary"),
-          block("Done.", "item_final", "final_answer"),
-        ],
-      },
+    h.end({
+      role: "assistant",
+      content: [
+        block("Working...", "item_commentary", "commentary"),
+        block("Done.", "item_final", "final_answer"),
+      ],
     });
     expectSingle(h, "Done.");
   });
@@ -512,16 +494,13 @@ describe("reasoning delivery", () => {
     const h = setup({ reasoningMode: "on" });
     const thinking = { type: "thinking", thinking: "Because it helps" };
     const message = { role: "assistant", content: [thinking] };
-    h.emit({ type: "message_start", message });
+    h.start(message);
     h.textUpdate(message, "thinking_end", thinking.thinking);
     responsePair(h, "Alpha", "item_alpha");
     responsePair(h, "Beta", "item_beta");
-    h.emit({
-      type: "message_end",
-      message: {
-        role: "assistant",
-        content: [thinking, block("Alpha", "item_alpha"), block("Beta", "item_beta")],
-      },
+    h.end({
+      role: "assistant",
+      content: [thinking, block("Alpha", "item_alpha"), block("Beta", "item_beta")],
     });
     expect(h.texts()).toEqual(["Because it helps", "Alpha", "Beta"]);
   });
