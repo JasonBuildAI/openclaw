@@ -204,3 +204,38 @@ it("bounds work after unfenced XML while continuing the visible reply", () => {
   // Includes bounded Markdown tail checks, but never a growing whole-reply scan per delta.
   expect(testedCharacters).toBeLessThan(source.length * 64);
 });
+
+describe("inline code beside a partial tag candidate", () => {
+  // A backtick marks the paragraph ambiguous for the carried scan, but a plain paragraph line
+  // cannot be owned as code, so its unfinished candidate must not re-project the whole reply.
+  const mixed = "The guard rejects the call when `min` exceeds `max`, so `a < b` returns false. ";
+  const answer = (size: number) => mixed.repeat(Math.ceil(size / mixed.length)).slice(0, size);
+
+  it("keeps Markdown ownership work proportional to the reply", () => {
+    const source = answer(32_000);
+    const work = observeMarkdownOwnership();
+    try {
+      const projection = createTextProjection([xmlFilter()]);
+      streamChunks(source, CHUNK, projection);
+      expect(projection.text).toBe(source);
+      expect(work.characters()).toBeLessThan(source.length * 4);
+    } finally {
+      work.restore();
+    }
+  });
+
+  it("declines the fast path for a line Markdown can own as block code", () => {
+    const source = `Indented below.\n\n${"    <tool\n".repeat(120)}`;
+    const work = observeMarkdownOwnership();
+    try {
+      const filter = xmlFilter();
+      const projection = createTextProjection([filter]);
+      streamChunks(source, CHUNK, projection);
+      expect(projection.text).toBe(filter.transform(source));
+      // The indented block keeps code ownership, so the canonical parse really does run.
+      expect(work.characters()).toBeGreaterThan(0);
+    } finally {
+      work.restore();
+    }
+  });
+});

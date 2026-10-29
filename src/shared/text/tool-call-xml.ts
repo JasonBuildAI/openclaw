@@ -22,6 +22,15 @@ import {
 } from "./tool-call-xml-transform.js";
 export { stripToolCallXmlTags } from "./tool-call-xml-transform.js";
 
+// A block-level line head can be owned as code (indented code, containers), so its unfinished
+// candidate needs the canonical parse. A plain paragraph line cannot, whatever its backticks do.
+const BLOCK_OWNED_LINE_HEAD = /^[ \t]|^ {0,3}(?:>|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$))/;
+
+/** Text before a candidate on its own physical line; block ownership depends only on that head. */
+function candidateLineHead(start: number, text: string): string {
+  return text.slice(text.lastIndexOf("\n", start - 1) + 1, start);
+}
+
 export function toolCallXmlTextFilter(
   options: StripToolCallXmlOptions = {},
   streaming = false,
@@ -100,7 +109,12 @@ export function toolCallXmlTextFilter(
               // Only the unfinished candidate line can be classified from the carried tail.
               const completed = { ...protectionScan };
               advanceProtectionScanState(completed, "\n");
-              if (!completed.paragraphAmbiguous && !completed.structuralUnknown) {
+              // A backtick or block head leaves code ownership for the canonical parser, but only
+              // a block head can actually own the line as code. Without one, the carried scan
+              // already proved the candidate is paragraph text, and forcing the parse here would
+              // re-project the whole reply on every later delta.
+              const blockHead = BLOCK_OWNED_LINE_HEAD.test(candidateLineHead(start, text));
+              if (!completed.structuralUnknown && (!completed.paragraphAmbiguous || !blockHead)) {
                 if (completed.fenceChar) {
                   deferredStart = start;
                   relative = nextRelative;
