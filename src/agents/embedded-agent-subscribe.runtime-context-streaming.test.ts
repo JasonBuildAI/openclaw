@@ -31,7 +31,7 @@ async function stream(text: string, size: number, inspect?: (visible: string) =>
   }
   return ctx.state.assistantStream?.text ?? "";
 }
-it.each(["", "MEDIA: ./chart.png\n"])(
+it.each(["", "MEDIA: ./chart.png\n", "See [[N]]. ", "x=[[1,2],[3,4]]; ", "a[[0]] "])(
   "bounds stream work: %j",
   async (prefix) => {
     const text = prefix + source;
@@ -42,24 +42,6 @@ it.each(["", "MEDIA: ./chart.png\n"])(
     expect(characters(scrub.mock.calls)).toBe(0);
   },
   30_000,
-);
-// Literal `[[...]]` prose is not directive syntax. Identity-proven prefixes must keep the
-// projection append path instead of re-parsing the whole reply per delta.
-it.each([
-  ["wiki link", "See [[Architecture Notes]] for context.\n\n"],
-  ["array literal", "Result:\n\nconst grid = [[1,2],[3,4]];\n\n"],
-  ["index expression", "Read a[[0]] then continue.\n\n"],
-])("bounds stream work for literal %s", async (_name, prefix) => {
-  const text = prefix + source;
-  expect(await stream(text, 3)).toBe(replyDirectives.parseReplyDirectives(text).text);
-  expect(characters(parse.mock.calls)).toBeLessThan(1_000_000);
-});
-it.each([1, 3, 7, 13])(
-  "still strips a real directive next to literal brackets at %i-character deltas",
-  async (size) => {
-    const text = "Intro [[Notes]] then [[audio_as_voice]]\n\nSpoken body.\n\nOutro.";
-    expect(await stream(text, size)).toBe(replyDirectives.parseReplyDirectives(text).text);
-  },
 );
 it("still scrubs a complete runtime-context block", async () => {
   const text = [
@@ -77,6 +59,8 @@ it.each([1, 3, 7, 13])("preserves directives at %i-character deltas", async (siz
     "Intro.\n\nMEDIA: ./a.png\n\nOutro",
     "Intro.\n\nMEDIA: /tmp/x.pdf\n\nMiddle.\n\nMEDIA: ./b.png\n\nOutro",
     "Intro [[audio_as_voice]]\n\nMEDIA: ./voice.ogg\n\nOutro",
+    "Intro [[Notes]] then [[audio_as_voice]]\n\nSpoken body.\n\nOutro.",
+    "`[[audio_as_voice]]``",
     "[[reply_to_current]]Intro.\n\nMEDIA: ./a.png\n\nOutro",
     "Intro.\n\n```text\nMEDIA: ./literal.png\n```\n\nOutro",
     "Intro.\n\n    MEDIA: ./indented.png\n\nOutro",
