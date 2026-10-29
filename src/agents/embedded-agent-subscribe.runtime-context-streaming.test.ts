@@ -43,6 +43,24 @@ it.each(["", "MEDIA: ./chart.png\n"])(
   },
   30_000,
 );
+// Literal `[[...]]` prose is not directive syntax. Identity-proven prefixes must keep the
+// projection append path instead of re-parsing the whole reply per delta.
+it.each([
+  ["wiki link", "See [[Architecture Notes]] for context.\n\n"],
+  ["array literal", "Result:\n\nconst grid = [[1,2],[3,4]];\n\n"],
+  ["index expression", "Read a[[0]] then continue.\n\n"],
+])("bounds stream work for literal %s", async (_name, prefix) => {
+  const text = prefix + source;
+  expect(await stream(text, 3)).toBe(replyDirectives.parseReplyDirectives(text).text);
+  expect(characters(parse.mock.calls)).toBeLessThan(1_000_000);
+});
+it.each([1, 3, 7, 13])(
+  "still strips a real directive next to literal brackets at %i-character deltas",
+  async (size) => {
+    const text = "Intro [[Notes]] then [[audio_as_voice]]\n\nSpoken body.\n\nOutro.";
+    expect(await stream(text, size)).toBe(replyDirectives.parseReplyDirectives(text).text);
+  },
+);
 it("still scrubs a complete runtime-context block", async () => {
   const text = [
     "Visible intro.",

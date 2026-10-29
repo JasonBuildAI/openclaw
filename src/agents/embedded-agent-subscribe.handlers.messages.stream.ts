@@ -326,6 +326,12 @@ export function createStreamingReplyResolver(): StreamingReplyResolver {
   // An invalid media reference rewrites its notice in place as the line grows, so those replies
   // keep the canonical parse.
   let settledDirectiveNotice = false;
+  // `[[` only *can* start directive syntax; wiki links, nested array literals, and index
+  // expressions are literal prose that the canonical parse returns unchanged. Remember whether the
+  // last canonical parse proved that identity, so a marker-bearing prefix keeps the
+  // projection-proven append path instead of re-parsing the whole reply on every delta. A new
+  // marker clears the proof until the canonical parse covers it.
+  let markerProvenLiteral = false;
   return (params) => {
     let preparedRawText = params.next;
     if (params.rawDirectiveSource !== undefined) {
@@ -338,6 +344,7 @@ export function createStreamingReplyResolver(): StreamingReplyResolver {
       if (params.rawDirectiveDelta === undefined) {
         directiveCodePrefix = undefined;
         hasDirectiveMarker = false;
+        markerProvenLiteral = false;
         previousChar = "";
       }
       // Untrimmed sources answer to their own trim owner, so the settled clean prefix does not
@@ -345,6 +352,8 @@ export function createStreamingReplyResolver(): StreamingReplyResolver {
       settledDirectiveSource = undefined;
       if ((previousChar + appended).includes("[[")) {
         hasDirectiveMarker = true;
+        // A fresh marker is unproven until the canonical parse covers it.
+        markerProvenLiteral = false;
         directiveCodePrefix = undefined;
       }
       if (appended) {
@@ -383,7 +392,7 @@ export function createStreamingReplyResolver(): StreamingReplyResolver {
       params.parsedStreamDirectives.text === params.visibleDelta &&
       params.appendDelta !== null &&
       params.previousText === params.previousCleaned &&
-      (directiveCodePrefix || !hasDirectiveMarker)
+      (directiveCodePrefix || !hasDirectiveMarker || markerProvenLiteral)
     ) {
       // Visibility and trim owners already prepared this exact append.
       text = params.next;
@@ -436,7 +445,7 @@ export function createStreamingReplyResolver(): StreamingReplyResolver {
       !hasReplyDirectiveMetadata(params.parsedStreamDirectives) &&
       settledDirectiveSource !== undefined &&
       !settledDirectiveTail &&
-      !settledDirectiveMarked &&
+      (!settledDirectiveMarked || markerProvenLiteral) &&
       !settledDirectiveNotice &&
       params.next.length === settledDirectiveSource.length + params.appendDelta.length &&
       params.next.endsWith(params.appendDelta) &&
@@ -485,6 +494,16 @@ export function createStreamingReplyResolver(): StreamingReplyResolver {
       settledDirectiveMarked =
         settledDirectiveSource !== undefined && preparedRawText.includes("[[");
       settledDirectiveNotice = Boolean(parsed.mediaFailures?.length);
+      // Identity proves every `[[...]]` in this prefix is literal prose, so later appends that the
+      // directive owner reports as plain text can extend it. A held tail, a stripped directive, a
+      // media notice, or reply metadata all mean the marker changed the text and the proof fails.
+      markerProvenLiteral =
+        source.includes("[[") &&
+        parsed.text === source &&
+        !split?.tail &&
+        !parsed.mediaFailures?.length &&
+        !parsed.mediaUrls?.length &&
+        !hasReplyDirectiveMetadata(parsed);
       if (
         params.evtType !== "text_end" &&
         params.appendDelta !== null &&
