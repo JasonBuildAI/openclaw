@@ -45,6 +45,15 @@ backup.
 
 ## Update implementation contract
 
+Linux managed updates run in a separate user service and slice, so an agent exec's
+descendant cleanup, Gateway restarts, and the Gateway unit's memory limit do not
+own the handoff. If its recorded helper and updater die, update status or startup
+reconciliation records `handoff-terminated` with the last phase. An owned npm stage
+that never reached activation is removed after checking for surviving work;
+uncertain cleanup leaves a warning and retains the stage. Activation recovery
+and backups remain with their existing recovery owners. These changes must be
+present in the installed updater; a newer candidate cannot repair an old launcher.
+
 Managed systemd stops bound the native command by the selected unit's effective
 stop timeout plus five seconds. Unavailable or infinite policy uses the finite
 Gateway stop budget with a warning; a command timeout retains its reason code
@@ -1838,6 +1847,15 @@ when every plugin migration phase reports no remaining work and its settings
 validate. It does not run offline repairs. A remaining migration stays pending
 with its phase named in the Gateway log. An explicit state-migration obligation
 also stays pending if the installed plugin no longer supplies its detector.
+Doctor settles an unused or disabled unavailable plugin's pending upgrade when
+there are no retained settings to migrate, even if an earlier update recorded a
+required migration. It keeps existing plugin state and defers required migration
+or inspection until the plugin is active. Installing or enabling that plugin
+does not bypass its migration: runtime admission holds it until Doctor migrates
+the state or confirms it is already ready. This deferral clears the inactive
+plugin's repair warning without claiming its state was migrated.
+Active plugins and retained settings still require their
+migration owner; Doctor names the install or enable step when that owner is missing.
 For a systemd system unit, Doctor
 checks stop permission before draining the Gateway; an unprivileged run names
 the `sudo systemctl stop <unit>` command for the service owner. Run Doctor as the
